@@ -335,14 +335,15 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
     return json({ error: "Method not allowed" }, { status: 405 });
   }
 
-  const auth = await authenticate(withTokenQuery(request), env);
+  const effectiveRequest = withTokenQuery(request);
+  const auth = await authenticate(effectiveRequest, env);
+  // const auth = await authenticate(withTokenQuery(request), env);
   if (!auth.ok) return rpcErrorResponse(null, -32001, "Unauthorized", 401);
 
   let body: unknown;
   try {
-    body = await request.json();
-    // const rawText = await request.text();
-    // console.log("raw body:", rawText);
+    body = await effectiveRequest.json();
+    // body = await request.json();
   } catch {
     return rpcErrorResponse(null, -32700, "Parse error", 400);
   }
