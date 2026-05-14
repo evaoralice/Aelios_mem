@@ -25,7 +25,8 @@ interface ToolCallParams {
 function withTokenQuery(request: Request): Request {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
-  if (!token || request.headers.has("authorization")) return request;
+  // if (!token || request.headers.has("authorization")) return request;
+  if (!token || (request.headers.has("authorization") && request.headers.get("authorization")?.trim())) return request;
 
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${token}`);
