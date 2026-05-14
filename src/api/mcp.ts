@@ -339,7 +339,9 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
 
   let body: unknown;
   try {
-    body = await request.json();
+    // body = await request.json();
+    const rawText = await request.text();
+    console.log("raw body:", rawText);
   } catch {
     return rpcErrorResponse(null, -32700, "Parse error", 400);
   }
