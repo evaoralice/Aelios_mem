@@ -2462,7 +2462,7 @@ const USAGE_LOGS_RETENTION_DAYS = 30;
 const MEMORY_EVENTS_RETENTION_DAYS = 30;
 const IDEMPOTENCY_KEYS_RETENTION_DAYS = 7;
 const MEMORY_ACTIVE_EXPIRY_DAYS = 180;
-const MEMORY_HARD_DELETE_DAYS = 30;
+const MEMORY_HARD_DELETE_DAYS = 365;
 const THROTTLE_HOURS = 24;
 const RETENTION_BATCH_SIZE = 100;
 
@@ -2701,7 +2701,7 @@ check("retention constants are correct", () => {
   assert.strictEqual(MEMORY_EVENTS_RETENTION_DAYS, 30);
   assert.strictEqual(IDEMPOTENCY_KEYS_RETENTION_DAYS, 7);
   assert.strictEqual(MEMORY_ACTIVE_EXPIRY_DAYS, 180);
-  assert.strictEqual(MEMORY_HARD_DELETE_DAYS, 30);
+  assert.strictEqual(MEMORY_HARD_DELETE_DAYS, 365);
   assert.strictEqual(THROTTLE_HOURS, 24);
   assert.strictEqual(RETENTION_BATCH_SIZE, 100);
 });

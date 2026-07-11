@@ -21,7 +21,7 @@ const USAGE_LOGS_RETENTION_DAYS = 30;
 const MEMORY_EVENTS_RETENTION_DAYS = 30;
 const IDEMPOTENCY_KEYS_RETENTION_DAYS = 7;
 const MEMORY_ACTIVE_EXPIRY_DAYS = 180;
-const MEMORY_HARD_DELETE_DAYS = 30;
+const MEMORY_HARD_DELETE_DAYS = 365;
 const THROTTLE_HOURS = 24;
 
 // ---------------------------------------------------------------------------
