@@ -171,8 +171,8 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
               <i data-lucide="save" class="h-4 w-4"></i><span>保存</span>
             </button>
           </div>
-          <textarea x-model="digestDraft" maxlength="500" class="min-h-40 w-full resize-y rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm leading-7 text-zinc-100 outline-none transition duration-150 ease-in-out focus:border-coral" placeholder="今天的长期上下文摘要"></textarea>
-          <div class="mt-2 text-right text-xs text-zinc-400" x-text="digestDraft.length + ' / 500'"></div>
+          <textarea x-model="digestDraft" maxlength="1000" class="min-h-40 w-full resize-y rounded-2xl border border-zinc-800 bg-[#0a0a0b] p-4 text-sm leading-7 text-zinc-100 outline-none transition duration-150 ease-in-out focus:border-coral" placeholder="今天的长期上下文摘要"></textarea>
+          <div class="mt-2 text-right text-xs text-zinc-400" x-text="digestDraft.length + ' / 1000'"></div>
         </article>
 
         <div class="space-y-3">
@@ -555,7 +555,7 @@ function memoryAdmin() {
         const data = await this.request(this.withNamespace('/v1/memory_boot?start=' + encodeURIComponent(range.start) + '&end=' + encodeURIComponent(range.end)));
         this.boot = data.data || {};
         this.stats = this.boot.stats || {};
-        this.digestDraft = this.boot.digest && this.boot.digest.content ? this.boot.digest.content.slice(0, 500) : '';
+        this.digestDraft = this.boot.digest && this.boot.digest.content ? this.boot.digest.content.slice(0, 1000) : '';
         this.todayMessages = this.boot.today_messages || [];
         this.precious = this.boot.precious || [];
         this.glossary = this.boot.glossary || [];
@@ -618,7 +618,7 @@ function memoryAdmin() {
       try {
         await this.request(this.withNamespace('/v1/memory_boot'), {
           method: 'PATCH',
-          body: JSON.stringify({ namespace: this.namespace, content: this.digestDraft.slice(0, 500) })
+          body: JSON.stringify({ namespace: this.namespace, content: this.digestDraft.slice(0, 1000) })
         });
         await this.loadBoot();
         this.notify('摘要已保存');

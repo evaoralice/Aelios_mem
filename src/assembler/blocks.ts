@@ -176,7 +176,7 @@ const presetLiteBlock: Block = {
 
 // ---------------------------------------------------------------------------
 // Block 3.5: boot_stable (stable)
-// v2 boot package: digest + yesterday_log + glossary.
+// v2 boot package: digest + recent_logs + glossary.
 // Sits before cache anchor — stable content that rarely changes.
 // ---------------------------------------------------------------------------
 
@@ -494,16 +494,14 @@ export function assemble(ctx: AssemblerContext): AssembledPrompt {
   // Each looks back up to 20 content blocks for a previous cache entry.
   //
   // Breakpoint 1 (tools): applied in adapter if tool definitions are stable.
-  // Breakpoint 2 (system): persona_pinned — the most stable content.
-  // Breakpoint 3 (bridge): mid-history for long conversations (>16 blocks),
-  //   so the tail anchor's 20-block lookback doesn't lose older cached prefix.
+  // Breakpoint 2 (system): persona_pinned — the most stable content (cache anchor).
+  // Breakpoint 3 (boot_stable): digest + recent_logs + glossary — stable within a day.
   // Breakpoint 4 (tail): last stable block before dynamic content.
   //   Mode A (default): last block of the message before current_user.
   //   Mode B: first text block of current_user (opt-in).
   //
   // Dynamic content (memories, time reminders) is appended AFTER all
   // breakpoints and never gets cache_control.
-  const LOOKBACK = 16; // Conservative margin (Anthropic allows 20)
   const breakpoints: CacheBreakpoint[] = [];
 
   // Breakpoint 2: system anchor on persona_pinned
@@ -513,6 +511,21 @@ export function assemble(ctx: AssemblerContext): AssembledPrompt {
       system_block_index: anchorIndex,
       reason: "system",
     });
+  }
+
+  // Breakpoint 3: boot_stable — cache_control on the boot_stable system block.
+  // Replaces the old bridge breakpoint. boot_stable is stable within a day
+  // (digest + recent_logs + glossary), so it's worth caching.
+  for (let i = 0; i < systemBlocks.length; i++) {
+    if (enabledBlockIds[i] === "boot_stable") {
+      systemBlocks[i].cache_control = { type: "ephemeral", ttl: "5m" };
+      breakpoints.push({
+        target: "system",
+        system_block_index: i,
+        reason: "boot_stable",
+      });
+      break;
+    }
   }
 
   // Message-level breakpoints: bridge + tail
@@ -536,38 +549,6 @@ export function assemble(ctx: AssemblerContext): AssembledPrompt {
       block_index: tailBlockIdx,
       reason: "tail",
     });
-
-    // bridge: if total message blocks before the tail message is > LOOKBACK,
-    // place a bridge anchor ~LOOKBACK blocks before the tail to keep the
-    // cache chain connected across long conversations.
-    let blocksBeforeTail = 0;
-    for (let i = 0; i < tailIdx; i++) blocksBeforeTail += msgBlockCounts[i];
-
-    if (blocksBeforeTail > LOOKBACK) {
-      // Walk backward from tailIdx to find the message containing
-      // the block at position (blocksBeforeTail - LOOKBACK)
-      let target = blocksBeforeTail - LOOKBACK;
-      let accumulated = 0;
-      let bridgeMsgIdx = 0;
-      let bridgeBlockIdx = 0;
-      for (let i = 0; i < tailIdx; i++) {
-        if (accumulated + msgBlockCounts[i] > target) {
-          bridgeMsgIdx = i;
-          bridgeBlockIdx = target - accumulated;
-          break;
-        }
-        accumulated += msgBlockCounts[i];
-      }
-      // Don't add bridge if it would be the same as tail
-      if (bridgeMsgIdx !== tailIdx || bridgeBlockIdx !== tailBlockIdx) {
-        breakpoints.push({
-          target: "message",
-          message_index: bridgeMsgIdx,
-          block_index: bridgeBlockIdx,
-          reason: "bridge",
-        });
-      }
-    }
   }
 
   return {

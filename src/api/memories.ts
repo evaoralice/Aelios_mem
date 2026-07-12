@@ -29,7 +29,8 @@ import {
   updateMemoryCandidateStatus,
   upsertDigest,
   upsertGlossary,
-  upsertMemoryByFactKey
+  upsertMemoryByFactKey,
+  DIGEST_MAX_CHARS
 } from "../db/v2";
 import { isV2Enabled } from "../memory/v2/recall";
 import { enqueueMemoryMaintenanceIfNeeded } from "../queue/producer";
@@ -374,7 +375,7 @@ export async function handleMemoryBoot(request: Request, env: Env): Promise<Resp
     if (!body) return openAiError("Request body must be a JSON object", 400);
     const content = readString(body.content);
     if (!content) return openAiError("content is required", 400);
-    const digest = await upsertDigest(env.DB, { namespace, content: content.slice(0, 1200) });
+    const digest = await upsertDigest(env.DB, { namespace, content: content.slice(0, DIGEST_MAX_CHARS) });
     return json({ data: digest });
   }
 

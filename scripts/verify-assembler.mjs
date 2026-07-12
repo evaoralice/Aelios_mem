@@ -220,7 +220,7 @@ function assemble(ctx) {
       const { stable } = splitClientSystemTexts(texts);
       if (stable.length > 0) text = stable.join("\n\n");
     } else if (blockId === "boot_stable") {
-      // v2 boot package: digest + yesterday_log + glossary.
+      // v2 boot package: digest + recent_logs + glossary.
       // Positioned AFTER cache anchor — can change daily without
       // invalidating the cached system prefix.
       if (ctx.boot) {
@@ -228,12 +228,11 @@ function assemble(ctx) {
         if (ctx.boot.digest) {
           parts.push("<digest>", ctx.boot.digest.content, "</digest>");
         }
-        if (ctx.boot.yesterday_log) {
-          parts.push(
-            "<yesterday_log>",
-            `【${ctx.boot.yesterday_log.title}】${ctx.boot.yesterday_log.summary}`,
-            "</yesterday_log>"
+        if (ctx.boot.recent_logs && ctx.boot.recent_logs.length > 0) {
+          const entries = ctx.boot.recent_logs.map(
+            (log) => `[${log.date}]【${log.title}】${log.summary}`
           );
+          parts.push("<daily_log>", ...entries, "</daily_log>");
         }
         if (ctx.boot.glossary && ctx.boot.glossary.length > 0) {
           const entries = ctx.boot.glossary.map((g) => `${g.term}: ${g.definition}`);
@@ -274,6 +273,9 @@ function assemble(ctx) {
     if (blockId === "client_system") {
       systemBlock.cache_control = { type: "ephemeral", ttl: "5m" };
       anchorIndex = systemBlocks.length;
+    }
+    if (blockId === "boot_stable") {
+      systemBlock.cache_control = { type: "ephemeral", ttl: "5m" };
     }
 
     systemBlocks.push(systemBlock);
@@ -487,12 +489,14 @@ check("client_system block has cache_control", () => {
   assert.deepStrictEqual(block.cache_control, { type: "ephemeral", ttl: "5m" });
 });
 
-check("no other block has cache_control", () => {
+check("no other block has cache_control except client_system and boot_stable", () => {
   const ctx = makeBaseCtx();
   const result = assemble(ctx);
 
+  // client_system and boot_stable both have cache_control (Phase 5)
   for (let i = 0; i < result.system_blocks.length; i++) {
-    if (i === result.meta.anchor_index) continue;
+    if (i === result.meta.anchor_index) continue; // skip client_system
+    if (result.meta.block_ids[i] === "boot_stable") continue; // skip boot_stable
     assert.strictEqual(
       result.system_blocks[i].cache_control,
       undefined,
@@ -1071,19 +1075,23 @@ function applyCacheOverrides(systemBlocks, env) {
 
 console.log("\n--- Test 9: Anthropic path ---");
 
-check("cache_control on client_system block only", () => {
+check("cache_control on client_system and boot_stable blocks", () => {
   const ctx = makeBaseCtx();
   const assembled = assemble(ctx);
   const anthropicSystem = assembledToAnthropicSystem(assembled.system_blocks);
 
-  // Exactly one block should have cache_control
+  // client_system and boot_stable both have cache_control (Phase 5)
   const withCache = anthropicSystem.filter((b) => b.cache_control);
-  assert.strictEqual(withCache.length, 1);
+  const bootIdx = assembled.meta.block_ids.indexOf("boot_stable");
+  const expectedCount = (assembled.meta.anchor_index >= 0 ? 1 : 0) + (bootIdx >= 0 ? 1 : 0);
+  assert.strictEqual(withCache.length, expectedCount);
 
-  // That block should be the one at anchor_index
-  const anchorBlock = anthropicSystem[assembled.meta.anchor_index];
-  assert.ok(anchorBlock.cache_control);
-  assert.strictEqual(anchorBlock.cache_control.type, "ephemeral");
+  // Anchor block should have cache_control
+  if (assembled.meta.anchor_index >= 0) {
+    const anchorBlock = anthropicSystem[assembled.meta.anchor_index];
+    assert.ok(anchorBlock.cache_control);
+    assert.strictEqual(anchorBlock.cache_control.type, "ephemeral");
+  }
 });
 
 check("dynamic memory block after client_system has no cache_control", () => {
@@ -1649,7 +1657,7 @@ check("OpenAI helper: strips Claude native thinking but keeps reasoning_effort",
   assert.strictEqual(req.reasoning_effort, "high");
 });
 
-check("Anthropic helper: system cache_control on client_system", () => {
+check("Anthropic helper: system cache_control on client_system and boot_stable", () => {
   const ctx = makeBaseCtx();
   ctx.systemMessages = [{ role: "system", content: "角色卡" }];
   ctx.ragMemories = [{ type: "note", importance: 0.7, content: "喜欢猫" }];
@@ -1661,9 +1669,13 @@ check("Anthropic helper: system cache_control on client_system", () => {
     {}
   );
   const withCache = req.system.filter((b) => b.cache_control);
-  assert.strictEqual(withCache.length, 1);
-  // Cache is on client_system (long persona text)
-  assert.ok(withCache[0].text.includes("角色卡"));
+  // client_system + boot_stable both have cache_control (Phase 5)
+  const hasClientSystem = withCache.some((b) => b.text.includes("角色卡"));
+  assert.ok(hasClientSystem, "client_system has cache_control");
+  const bootIdx = assembled.meta.block_ids.indexOf("boot_stable");
+  if (bootIdx >= 0) {
+    assert.ok(withCache.length >= 2, "boot_stable also has cache_control");
+  }
 });
 
 check("Anthropic helper: no top-level cache_control by default", () => {
@@ -2612,10 +2624,10 @@ check("already deleted memory is not touched by expireOldMemories", () => {
   assert.strictEqual(result[0].status, "deleted", "deleted status should not change");
 });
 
-check("expired memory older than 30 days is hard-deletable", () => {
+check("expired memory older than hard-delete threshold is hard-deletable", () => {
   const cutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const records = [
-    { id: "m9", status: "expired", updated_at: daysAgo(31) },
+    { id: "m9", status: "expired", updated_at: daysAgo(400) },
     { id: "m10", status: "expired", updated_at: daysAgo(10) },
   ];
   const candidates = simulateHardDeleteCandidates(records, cutoff);
@@ -2623,19 +2635,19 @@ check("expired memory older than 30 days is hard-deletable", () => {
   assert.strictEqual(candidates[0].id, "m9");
 });
 
-check("deleted memory older than 30 days is hard-deletable", () => {
+check("deleted memory older than hard-delete threshold is hard-deletable", () => {
   const cutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const records = [
-    { id: "m11", status: "deleted", updated_at: daysAgo(45) },
+    { id: "m11", status: "deleted", updated_at: daysAgo(400) },
   ];
   const candidates = simulateHardDeleteCandidates(records, cutoff);
   assert.strictEqual(candidates.length, 1);
 });
 
-check("superseded memory older than 30 days is hard-deletable", () => {
+check("superseded memory older than hard-delete threshold is hard-deletable", () => {
   const cutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const records = [
-    { id: "m12", status: "superseded", updated_at: daysAgo(60) },
+    { id: "m12", status: "superseded", updated_at: daysAgo(400) },
   ];
   const candidates = simulateHardDeleteCandidates(records, cutoff);
   assert.strictEqual(candidates.length, 1);
@@ -2644,16 +2656,16 @@ check("superseded memory older than 30 days is hard-deletable", () => {
 check("active memory is never hard-deletable", () => {
   const cutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const records = [
-    { id: "m13", status: "active", updated_at: daysAgo(100) },
+    { id: "m13", status: "active", updated_at: daysAgo(400) },
   ];
   const candidates = simulateHardDeleteCandidates(records, cutoff);
   assert.strictEqual(candidates.length, 0);
 });
 
-check("expired memory younger than 30 days is NOT hard-deletable", () => {
+check("expired memory younger than hard-delete threshold is NOT hard-deletable", () => {
   const cutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const records = [
-    { id: "m14", status: "expired", updated_at: daysAgo(15) },
+    { id: "m14", status: "expired", updated_at: daysAgo(100) },
   ];
   const candidates = simulateHardDeleteCandidates(records, cutoff);
   assert.strictEqual(candidates.length, 0);
@@ -2709,19 +2721,19 @@ check("retention constants are correct", () => {
 check("full lifecycle: active → expired → hard-deletable chain", () => {
   const now = Date.now();
   const cutoff180 = daysAgo(MEMORY_ACTIVE_EXPIRY_DAYS);
-  const cutoff30 = daysAgo(MEMORY_HARD_DELETE_DAYS);
+  const cutoffHard = daysAgo(MEMORY_HARD_DELETE_DAYS);
 
-  // Memory created 200 days ago, last updated 200 days ago
+  // Memory created 400 days ago, last updated 400 days ago
   const records = [
-    { id: "lifecycle", type: "note", status: "active", pinned: 0, updated_at: daysAgo(200), vector_id: "mem_lifecycle" },
+    { id: "lifecycle", type: "note", status: "active", pinned: 0, updated_at: daysAgo(400), vector_id: "mem_lifecycle" },
   ];
 
   // Step 1: expire
   const afterExpire = simulateExpireOldMemories(records, cutoff180);
   assert.strictEqual(afterExpire[0].status, "expired");
 
-  // Step 2: simulate 30+ days passing (updated_at stays at 200 days ago)
-  const candidates = simulateHardDeleteCandidates(afterExpire, cutoff30);
+  // Step 2: hard-delete candidates (updated_at stays at 400 days ago, > 365 threshold)
+  const candidates = simulateHardDeleteCandidates(afterExpire, cutoffHard);
   assert.strictEqual(candidates.length, 1);
   assert.strictEqual(candidates[0].id, "lifecycle");
   assert.strictEqual(candidates[0].vector_id, "mem_lifecycle");
@@ -2729,16 +2741,16 @@ check("full lifecycle: active → expired → hard-deletable chain", () => {
 
 check("full lifecycle: pinned memory survives all retention stages", () => {
   const cutoff180 = daysAgo(MEMORY_ACTIVE_EXPIRY_DAYS);
-  const cutoff30 = daysAgo(MEMORY_HARD_DELETE_DAYS);
+  const cutoffHard = daysAgo(MEMORY_HARD_DELETE_DAYS);
 
   const records = [
-    { id: "pinned-lifecycle", type: "persona", status: "active", pinned: 1, updated_at: daysAgo(300), vector_id: "mem_pl" },
+    { id: "pinned-lifecycle", type: "persona", status: "active", pinned: 1, updated_at: daysAgo(400), vector_id: "mem_pl" },
   ];
 
   const afterExpire = simulateExpireOldMemories(records, cutoff180);
   assert.strictEqual(afterExpire[0].status, "active", "pinned should stay active");
 
-  const candidates = simulateHardDeleteCandidates(afterExpire, cutoff30);
+  const candidates = simulateHardDeleteCandidates(afterExpire, cutoffHard);
   assert.strictEqual(candidates.length, 0, "active pinned should not be hard-deletable");
 });
 

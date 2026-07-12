@@ -19,8 +19,8 @@ persist = true
 head_sampling_rate = 1
 
 [triggers]
-# Cloudflare cron uses UTC. 20:10 UTC is 04:10 in Singapore/China time.
-crons = ["0 */4 * * *", "10 20 * * *"]
+# Cloudflare cron uses UTC. 19:00 UTC is 03:00 in Singapore/China time.
+crons = ["0 */4 * * *", "0 19 * * *"]
 
 [ai]
 binding = "AI"

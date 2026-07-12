@@ -40,7 +40,7 @@ export interface AssemblerContext {
    */
   pinnedPersonaMemories: MemoryApiRecord[] | null;
 
-  /** v2 boot package (digest + yesterday_log + precious + glossary). null = v1 path. */
+  /** v2 boot package (digest + recent_logs + precious + glossary). null = v1 path. */
   boot: BootPackage | null;
 
   /** RAG hits for the current round (v1) or recall hits (v2). */
@@ -107,9 +107,16 @@ export function countMessageBlocks(
   return content.length;
 }
 
+export interface SyntheticContext {
+  tool_name: string;
+  tool_use_id: string;
+  tool_result: string;
+}
+
 export interface AssembledPrompt {
   system_blocks: SystemBlock[];
   messages: Array<{ role: "user" | "assistant"; content: string | unknown[] | null }>;
+  synthetic_context?: SyntheticContext;
   meta: {
     anchor_index: number;
     block_ids: string[];
@@ -140,7 +147,7 @@ export const BLOCK_ORDER: readonly string[] = [
  * Cache prefix = proxy_static_rules + persona_pinned + preset_lite + client_system.
  * This includes the long persona/system prompt (4096+ tokens for Haiku threshold).
  *
- * boot_stable (glossary, digest, yesterday_log) is AFTER the anchor.
+ * boot_stable (glossary, digest, recent_logs) is AFTER the anchor.
  * It changes daily but does NOT invalidate the cached system prefix.
  * client_volatile_context (time), dynamic_memory_patch (RAG), vision_context
  * are also after the anchor — fully dynamic, never cached.
@@ -158,12 +165,11 @@ export function formatBootStable(boot: BootPackage): string {
   if (boot.digest) {
     parts.push("<digest>", boot.digest.content, "</digest>");
   }
-  if (boot.yesterday_log) {
-    parts.push(
-      "<yesterday_log>",
-      `【${boot.yesterday_log.title}】${boot.yesterday_log.summary}`,
-      "</yesterday_log>"
+  if (boot.recent_logs && boot.recent_logs.length > 0) {
+    const entries = boot.recent_logs.map(
+      (log) => `[${log.date}]【${log.title}】${log.summary}`
     );
+    parts.push("<daily_log>", ...entries, "</daily_log>");
   }
   if (boot.glossary.length > 0) {
     const entries = boot.glossary.map((g) => `${g.term}: ${g.definition}`);

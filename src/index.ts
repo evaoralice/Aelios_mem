@@ -23,7 +23,7 @@ import type { Env, QueueMessage } from "./types";
 import { openAiError } from "./utils/json";
 
 const EXTRACT_CRON = "0 */4 * * *";
-const DAILY_MAINTENANCE_CRON = "10 20 * * *";
+export const DAILY_MAINTENANCE_CRON = "0 19 * * *";
 
 function getDailyDigestNamespace(env: Env): string {
   return env.DREAM_NAMESPACE?.trim() || "default";

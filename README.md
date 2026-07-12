@@ -188,15 +188,15 @@ model=companion            → CHAT_MODEL
 请求含 image               → VISION_MODEL
 anthropic/claude*          → Anthropic native (/anthropic/v1/messages)
   ├─ 显式 cache_control 锚定稳定 system 前缀（persona_pinned / boot_stable / client_system 稳定段）
-  ├─ 多断点策略：system 锚 + tail 锚 + 长 history 的 bridge 锚，≤4 个标记
-  ├─ dynamic_memory_patch 后移到当前 user 块、不打 cache_control，绝不破坏缓存前缀
+  ├─ 多断点策略：system 锚 + boot_stable 锚 + tail 锚，≤4 个标记
+  ├─ dynamic_memory_patch 通过伪造 tool call 注入（`MEMORY_INJECTION_MODE=toolcall`）或追加到 user 块（默认 text 模式），不打 cache_control
   └─ rolling user cache 默认开，automatic cache 默认关
 custom-provider/claude-*   → Provider native (/custom-provider/messages)
 其他                       → OpenAI compat (/compat/chat/completions)
 workers-ai/@cf/...         → env.AI.run（不走 AI Gateway）
 ```
 
-**缓存安全要点**：召回补丁（每轮都变）被从 system blocks 里剥离，作为无 `cache_control` 的文本块追加到当前 user turn 末尾，位于所有断点之后。历史轮的召回补丁已固化成稳定 history，落在 tail 断点之前，可正常命中缓存。`verify-cache-strategy.mjs` T14 校验断点数 ≤4。
+**缓存安全要点**：召回补丁（每轮都变）被从 system blocks 里剥离。`MEMORY_INJECTION_MODE=toolcall` 时，通过伪造 `memory_context` tool call 注入（assistant tool_use + user tool_result），位于所有断点之后；`text` 模式（默认）时追加到当前 user turn 末尾。历史轮的召回补丁已固化成稳定 history，落在 tail 断点之前，可正常命中缓存。`verify-cache-strategy.mjs` T14 校验断点数 ≤4。
 
 **OpenRouter + Claude 路由约束**：OpenRouter 调 Claude 必须在 AI Gateway 里以 **custom-provider** 方式加 key，不能走官方 provider 路径。官方路径按 Anthropic 原生格式发请求，与 OpenRouter 的 OpenAI 兼容格式冲突，会破坏缓存和格式。模型名走 `custom-provider/claude-*` → Provider native 分支。
 
@@ -234,7 +234,7 @@ workers-ai/@cf/...         → env.AI.run（不走 AI Gateway）
 
 ## MCP 工具（`/mcp`）
 
-v2 暴露 15 个工具。`memory_create` 已废弃，调用会报错要求改用 `memory_upsert`。
+v2 暴露 16 个工具。`memory_create` 已废弃，调用会报错要求改用 `memory_upsert`。
 
 | 工具 | 作用 | 关键参数 / 备注 |
 |---|---|---|
@@ -252,7 +252,8 @@ v2 暴露 15 个工具。`memory_create` 已废弃，调用会报错要求改用
 | `memory_supersede` | 显式取代 | `old_id` + 新内容 |
 | `memory_archive` | 归档 | `id` |
 | `digest_get` | 读 L1 摘要 | — |
-| `digest_set` | 写 L1 摘要 | `content`（截 500 字） |
+| `digest_set` | 写 L1 摘要 | `content`（截 1000 字） |
+| `memory_context` | 系统记忆注入（系统专用） | 模型不应主动调用 |
 
 ## 记忆管线
 
@@ -261,7 +262,8 @@ v2 暴露 15 个工具。`memory_create` 已废弃，调用会报错要求改用
 ```
 取最后一条 user 消息 → embedding → Vectorize 搜索 top K
 → 分数地板过滤噪音 → 去重 → reranker 重排 → 压缩模型精简
-→ 作为 dynamic_memory_patch 追加到当前 user turn（不打 cache_control）
+→ MEMORY_INJECTION_MODE=toolcall 时伪造 memory_context tool call 注入；text 模式追加到 user turn
+→ source 为 model/mcp 的记忆可通过 RECALL_SOURCE_BOOST 加权（默认 1.0 不加权）
 ```
 
 **抽取（每 4 小时 cron `0 */4 * * *`）：**
@@ -275,25 +277,26 @@ v2 暴露 15 个工具。`memory_create` 已废弃，调用会报错要求改用
 → 游标推进；窗口抽完写 done 标记；model error 不推进，下个 cron 重试
 ```
 
-**整理（每天 04:10 本地时区 cron `10 20 * * *`）：**
+**整理（每天 03:00 本地时区 cron `0 19 * * *`）：**
 
 ```
 scheduled dream：
   ├─ 不再首次抽取（已交给 4h extractor），memories_to_add 默认空
   ├─ 合并重复、替换过时、更新冲突（memories_to_update / memories_to_delete）
   ├─ 保留重要原文摘录
-  └─ 重写 L1 摘要（截 500 字）+ 昨日日志
+  ├─ 重写 L1 摘要（截 1000 字）
+  └─ 生成分条列点的每日日志（≤800 字），保留历史，注入最近两天
 ```
 
 **清理（后台 Queue，24h 节流）：**
 
 ```
-messages: 14 天删
+messages: 3 天删
 usage_logs: 30 天删
 memory_events: 30 天删
 idempotency_keys: 7 天删
 memories: 非 pinned/identity/persona 180 天标 expired → 同步删 Vectorize
-hard delete: deleted/superseded/expired 超 30 天 → 先删 Vectorize 再删 D1
+hard delete: deleted/superseded/expired 超 365 天 → 先删 Vectorize 再删 D1
 （Vectorize 失败不删 D1，避免失配）
 ```
 
@@ -364,6 +367,13 @@ hard delete: deleted/superseded/expired 超 30 天 → 先删 Vectorize 再删 D
 | `ANTHROPIC_THINKING_BUDGET` | `1024` | 思考 token（1024–32000） |
 | `FORCE_ANTHROPIC_NATIVE` | 空 | `true` 强制 Anthropic native |
 | `CUSTOM_ANTHROPIC_MESSAGES_PATH` | `messages` | 原生 messages 路径 |
+
+### 记忆注入 / 召回加权
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MEMORY_INJECTION_MODE` | `text` | `text`=追加到 user 消息，`toolcall`=伪造 memory_context tool call |
+| `RECALL_SOURCE_BOOST` | `1.0` | source 为 model/mcp 的记忆得分乘数，`1.2` 适度加权 |
 
 ### 高级
 

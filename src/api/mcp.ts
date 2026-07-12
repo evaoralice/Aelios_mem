@@ -12,7 +12,8 @@ import {
   supersedeMemory,
   upsertDigest,
   upsertGlossary,
-  upsertMemoryByFactKey
+  upsertMemoryByFactKey,
+  DIGEST_MAX_CHARS
 } from "../db/v2";
 import { filterAndCompressMemories } from "../memory/filter";
 import { exportMemories } from "../memory/export";
@@ -258,13 +259,21 @@ function getTools(): Array<Record<string, unknown>> {
       name: "memory_upsert",
       description:
         "Assert/update a refined memory by fact_key (no waiting for dream). " +
-        "world_fact also uses this with type='world_fact'.",
+        "Use this proactively during conversation when the user reveals lasting facts, preferences, or relationship details. " +
+        "world_fact also uses this with type='world_fact'. " +
+        "Available types: fact, event, preference, relationship, boundary, habit, decision, note, world_fact. Defaults to 'fact'.",
       inputSchema: {
         type: "object",
         properties: {
-          fact_key: { type: "string" },
+          fact_key: {
+            type: "string",
+            description:
+              "Stable business key for deduplication. Reusing the same fact_key updates the existing memory instead of creating a duplicate. " +
+              "Examples: 'user_work_schedule', 'user_food_preference', 'relationship_with_alice'. " +
+              "Choose a concise, descriptive key that represents this fact."
+          },
           content: { type: "string" },
-          type: { type: "string" },
+          type: { type: "string", description: "Memory type. One of: fact, event, preference, relationship, boundary, habit, decision, note, world_fact. Defaults to 'fact'." },
           importance: { type: "number" },
           confidence: { type: "number" },
           tags: { type: "array", items: { type: "string" } },
@@ -308,7 +317,7 @@ function getTools(): Array<Record<string, unknown>> {
     },
     {
       name: "digest_get",
-      description: "Read the L1 digest (single row per namespace, <=500 chars).",
+      description: "Read the L1 digest (single row per namespace, <=1000 chars).",
       inputSchema: {
         type: "object",
         properties: {
@@ -318,7 +327,7 @@ function getTools(): Array<Record<string, unknown>> {
     },
     {
       name: "digest_set",
-      description: "Overwrite the L1 digest (covering write, <=500 chars).",
+      description: "Overwrite the L1 digest (covering write, <=1000 chars).",
       inputSchema: {
         type: "object",
         properties: {
@@ -327,11 +336,22 @@ function getTools(): Array<Record<string, unknown>> {
         },
         required: ["content"]
       }
+    },
+    {
+      name: "memory_context",
+      description:
+        "System-only memory injection tool. Automatically called by the system to provide " +
+        "relevant long-term memories. Do not call this tool manually.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
     }
   ];
 }
 
-async function callTool(
+export async function callTool(
   env: Env,
   ctx: ExecutionContext,
   profile: KeyProfile,
@@ -653,12 +673,19 @@ async function callTool(
     if (!isV2Enabled(env)) return toolError("digest_set requires MEMORY_LIFECYCLE_ENABLED=true");
     const content = readString(args.content);
     if (!content) return toolError("content is required");
-    if (content.length > 500) return toolError("digest content must be <= 500 chars (L1 摘要字数自检)");
+    if (content.length > DIGEST_MAX_CHARS) return toolError(`digest content must be <= ${DIGEST_MAX_CHARS} chars (L1 摘要字数自检)`);
     const row = await upsertDigest(env.DB, {
       namespace: resolveNamespace(profile, args.namespace),
       content
     });
     return textToolResult({ data: row });
+  }
+
+  if (params.name === "memory_context") {
+    return textToolResult({
+      text: "This tool is system-managed and has already been executed. "
+          + "The relevant context has been provided. Do not call this tool manually."
+    });
   }
 
   return toolError(`Unknown tool: ${String(params.name || "")}`);

@@ -27,6 +27,8 @@ async function fetchMemoryForSync(
 // L1 摘要 digest (单行覆盖，每 namespace 一行)
 // =====================================================================
 
+export const DIGEST_MAX_CHARS = 1000;
+
 export interface DigestRow {
   namespace: string;
   content: string;
@@ -987,6 +989,17 @@ export async function getDailyLog(
     .bind(input.namespace, input.date)
     .first<DailyLogRow>();
   return row ?? null;
+}
+
+export async function getRecentDailyLogs(
+  db: D1Database,
+  input: { namespace: string; limit: number }
+): Promise<DailyLogRow[]> {
+  const result = await db
+    .prepare("SELECT namespace, date, title, summary, updated_at FROM daily_log WHERE namespace = ? ORDER BY date DESC LIMIT ?")
+    .bind(input.namespace, input.limit)
+    .all<DailyLogRow>();
+  return result.results ?? [];
 }
 
 export async function upsertDailyLog(

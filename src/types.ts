@@ -37,6 +37,10 @@ export interface Env {
   MEMORY_INJECT_DECAY_FACTOR?: string;
   // memory_recall 最低分地板，默认 0.15；调用方可用 min_score 临时覆盖。
   RECALL_MIN_SCORE?: string;
+  // 召回时 source 为 model/mcp 的记忆得分乘数，默认 1.0（不加权）。
+  RECALL_SOURCE_BOOST?: string;
+  // 记忆注入方式: "text" (默认, 追加文本) | "toolcall" (伪造 tool call)
+  MEMORY_INJECTION_MODE?: string;
   ENABLE_DAILY_MEMORY_DIGEST?: string;
   DREAM_NAMESPACE?: string;
   DREAM_MAX_MESSAGES?: string;

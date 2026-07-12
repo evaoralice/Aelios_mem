@@ -12,7 +12,7 @@
 
 import {
   getDigest,
-  getDailyLog,
+  getRecentDailyLogs,
   listPrecious,
   listGlossary,
   matchGlossary,
@@ -44,6 +44,11 @@ function injectDecayFactor(env: Env): number {
 function readRecallMinScore(env: Env, override?: number): number {
   const raw = override ?? Number(env.RECALL_MIN_SCORE ?? 0.15);
   return Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1) : 0.15;
+}
+
+function readSourceBoost(env: Env): number {
+  const raw = Number(env.RECALL_SOURCE_BOOST ?? "1.0");
+  return Number.isFinite(raw) && raw >= 1 ? raw : 1;
 }
 
 function decayForLastInjected(
@@ -138,7 +143,7 @@ function isDuplicateWithCore(content: string, core: CoreFingerprint): boolean {
 
 export interface BootPackage {
   digest: { content: string; updated_at: string } | null;
-  yesterday_log: { date: string; title: string; summary: string } | null;
+  recent_logs: Array<{ date: string; title: string; summary: string }>;
   precious: Array<{ id: string; content: string; created_at: string }>;
   glossary: Array<{ term: string; definition: string; aliases: string[] }>;
   schema_version: string;
@@ -175,17 +180,20 @@ export async function buildBootPackage(
     });
   }
 
-  // 昨天的日志 (dream 产出)
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const yesterdayLabel = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Singapore",
-    year: "numeric", month: "2-digit", day: "2-digit"
-  }).format(yesterday);
-  const dailyLog = await getDailyLog(env.DB, { namespace: input.namespace, date: yesterdayLabel });
+  // 最近两天的日志 (dream 产出)
+  const recentLogRows = await getRecentDailyLogs(env.DB, {
+    namespace: input.namespace,
+    limit: 2
+  });
+  const recent_logs = recentLogRows.map((r) => ({
+    date: r.date,
+    title: r.title,
+    summary: r.summary
+  }));
 
   return {
     digest: digest ? { content: digest.content, updated_at: digest.updated_at } : null,
-    yesterday_log: dailyLog ? { date: dailyLog.date, title: dailyLog.title, summary: dailyLog.summary } : null,
+    recent_logs,
     precious,
     glossary: allGlossary,
     schema_version: BOOT_SCHEMA_VERSION,
@@ -304,17 +312,20 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   });
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)
+  //    source 加权: model/mcp 来源的记忆得分 × RECALL_SOURCE_BOOST (默认 1.0)
   const windowMs = injectDecayWindowMs(env);
   const factor = injectDecayFactor(env);
+  const sourceBoost = readSourceBoost(env);
   const decayedIds: string[] = [];
   const scored: RecallHit[] = memories.map((m) => {
     const decay = decayForLastInjected(m.last_injected_at ?? null, windowMs, factor);
     if (decay < 1) decayedIds.push(m.id);
+    const boost = sourceBoost > 1 && (m.source === "model" || m.source === "mcp") ? sourceBoost : 1;
     return {
       id: m.id,
       content: m.content,
       type: m.type,
-      score: (m.score ?? 0) * decay,
+      score: (m.score ?? 0) * decay * boost,
       source_layer: "memory" as const
     };
   });

@@ -4,8 +4,8 @@
  *
  * Validates the 4-breakpoint Anthropic prompt caching strategy:
  *   1. tools: cache on last tool definition (stable tools)
- *   2. system: cache on persona_pinned (most stable content)
- *   3. bridge: mid-history anchor for long conversations
+ *   2. system: cache on client_system (cache anchor)
+ *   3. boot_stable: cache on digest + recent_logs + glossary (replaces bridge)
  *   4. tail: last stable block before dynamic content
  *
  * Run:  node scripts/verify-cache-strategy.mjs
@@ -73,7 +73,7 @@ function countMessageBlocks(content) {
 
 const PROXY_STATIC_RULES = "proxy static rules text";
 const PRESET_LITE = "preset lite text";
-const LOOKBACK = 16;
+// LOOKBACK constant removed — bridge breakpoint replaced by boot_stable in Phase 5.
 
 function assemble(ctx) {
   const systemBlocks = [];
@@ -107,7 +107,18 @@ function assemble(ctx) {
     blockIds.push("client_system");
   }
 
-  // Block 5: dynamic_memory_patch (dynamic)
+  // Block 5: boot_stable (stable, gets cache_control as breakpoint 3)
+  if (ctx.bootStable) {
+    const bootIdx = systemBlocks.length;
+    systemBlocks.push({
+      role: "system",
+      text: ctx.bootStable,
+      cache_control: { type: "ephemeral", ttl: "5m" },
+    });
+    blockIds.push("boot_stable");
+  }
+
+  // Block 6: dynamic_memory_patch (dynamic)
   if (ctx.memoryPatch) {
     systemBlocks.push({ role: "system", text: ctx.memoryPatch });
     blockIds.push("dynamic_memory_patch");
@@ -124,7 +135,7 @@ function assemble(ctx) {
   // --- 4-breakpoint computation ---
   const breakpoints = [];
 
-  // Breakpoint 2: system anchor on persona_pinned
+  // Breakpoint 2: system anchor on client_system
   if (anchorIndex >= 0) {
     breakpoints.push({
       target: "system",
@@ -133,7 +144,17 @@ function assemble(ctx) {
     });
   }
 
-  // Message-level breakpoints: bridge + tail
+  // Breakpoint 3: boot_stable (replaces old bridge)
+  const bootStableIdx = blockIds.indexOf("boot_stable");
+  if (bootStableIdx >= 0) {
+    breakpoints.push({
+      target: "system",
+      system_block_index: bootStableIdx,
+      reason: "boot_stable",
+    });
+  }
+
+  // Breakpoint 4: tail
   const msgBlockCounts = messages.map((m) => countMessageBlocks(m.content));
 
   let tailIdx = -1;
@@ -150,32 +171,6 @@ function assemble(ctx) {
       block_index: tailBlockIdx,
       reason: "tail",
     });
-
-    let blocksBeforeTail = 0;
-    for (let i = 0; i < tailIdx; i++) blocksBeforeTail += msgBlockCounts[i];
-
-    if (blocksBeforeTail > LOOKBACK) {
-      let target = blocksBeforeTail - LOOKBACK;
-      let accumulated = 0;
-      let bridgeMsgIdx = 0;
-      let bridgeBlockIdx = 0;
-      for (let i = 0; i < tailIdx; i++) {
-        if (accumulated + msgBlockCounts[i] > target) {
-          bridgeMsgIdx = i;
-          bridgeBlockIdx = target - accumulated;
-          break;
-        }
-        accumulated += msgBlockCounts[i];
-      }
-      if (bridgeMsgIdx !== tailIdx || bridgeBlockIdx !== tailBlockIdx) {
-        breakpoints.push({
-          target: "message",
-          message_index: bridgeMsgIdx,
-          block_index: bridgeBlockIdx,
-          reason: "bridge",
-        });
-      }
-    }
   }
 
   return {
@@ -270,6 +265,7 @@ const STABLE_SYSTEM = "You are a helpful assistant with many rules.";
 const BASE_CTX = {
   personaText: "You are Claude, an AI assistant.",
   clientSystem: STABLE_SYSTEM,
+  bootStable: "<digest>user likes midnight work</digest><daily_log>[2025-07-10]【整理】合并重复</daily_log>",
   memoryPatch: null,
   history: [],
   currentUser: null,
@@ -336,29 +332,21 @@ test("T4: tail on last history message, not current user", () => {
   assert.strictEqual(assembled.messages[tailBP.message_index].role, "assistant");
 });
 
-// T5: bridge breakpoint appears for long conversations
-test("T5: bridge appears for long conversations", () => {
-  // Create 20+ messages to exceed LOOKBACK (16) content blocks
-  const history = [];
-  for (let i = 0; i < 12; i++) {
-    history.push(userMsg(`user ${i}`));
-    history.push(assistantMsg(`assistant ${i}`));
-  }
+// T5: boot_stable breakpoint present (replaces old bridge)
+test("T5: boot_stable breakpoint present", () => {
   const ctx = {
     ...BASE_CTX,
-    history,
+    history: [userMsg("h1"), assistantMsg("a1")],
     currentUser: userMsg("current"),
   };
   const assembled = assemble(ctx);
-  const bridgeBP = assembled.meta.cache_breakpoints.find((bp) => bp.reason === "bridge");
-  assert.ok(bridgeBP, "has bridge breakpoint for long conversation");
-  // Bridge should be before the tail
-  const tailBP = assembled.meta.cache_breakpoints.find((bp) => bp.reason === "tail");
-  assert.ok(bridgeBP.message_index < tailBP.message_index, "bridge is before tail");
+  const bootBP = assembled.meta.cache_breakpoints.find((bp) => bp.reason === "boot_stable");
+  assert.ok(bootBP, "has boot_stable breakpoint");
+  assert.strictEqual(bootBP.target, "system");
 });
 
-// T6: no bridge for short conversations
-test("T6: no bridge for short conversations", () => {
+// T6: no bridge breakpoint (removed in Phase 5)
+test("T6: no bridge breakpoint", () => {
   const ctx = {
     ...BASE_CTX,
     history: [userMsg("h1"), assistantMsg("a1")],
@@ -366,7 +354,7 @@ test("T6: no bridge for short conversations", () => {
   };
   const assembled = assemble(ctx);
   const bridgeBP = assembled.meta.cache_breakpoints.find((bp) => bp.reason === "bridge");
-  assert.ok(!bridgeBP, "no bridge for short conversation");
+  assert.ok(!bridgeBP, "no bridge breakpoint (replaced by boot_stable)");
 });
 
 // T7: dynamic_memory_patch change does NOT invalidate system cache
@@ -449,13 +437,18 @@ test("T11: glossary change → persona_pinned cache unchanged", () => {
   );
 });
 
-// T12: no messages → no tail or bridge, only system
-test("T12: no messages → only system breakpoint", () => {
-  const ctx = { ...BASE_CTX, history: [], currentUser: userMsg("first") };
+// T12: no messages → system + boot_stable breakpoints (no tail)
+test("T12: no messages → system + boot_stable breakpoints, no tail", () => {
+  const ctx = { ...BASE_CTX };
   const assembled = assemble(ctx);
   const bps = assembled.meta.cache_breakpoints;
-  assert.strictEqual(bps.length, 1);
-  assert.strictEqual(bps[0].reason, "system");
+  // system + boot_stable, no tail (no messages)
+  const hasSystem = bps.some((bp) => bp.reason === "system");
+  const hasBootStable = bps.some((bp) => bp.reason === "boot_stable");
+  const hasTail = bps.some((bp) => bp.reason === "tail");
+  assert.ok(hasSystem, "has system breakpoint");
+  assert.ok(hasBootStable, "has boot_stable breakpoint");
+  assert.ok(!hasTail, "no tail breakpoint (no messages)");
 });
 
 // T13: tools breakpoint on last tool
@@ -475,7 +468,7 @@ test("T13: tools breakpoint lands on last tool", () => {
   assert.ok(cached[2].cache_control, "last tool has cache");
 });
 
-// T14: exactly 4 breakpoints max (tools + system + bridge + tail)
+// T14: exactly 4 breakpoints max (tools + system + boot_stable + tail)
 test("T14: at most 4 breakpoints", () => {
   const history = [];
   for (let i = 0; i < 15; i++) {

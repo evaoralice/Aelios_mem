@@ -204,6 +204,24 @@ function appendUncachedUserContext(
   messages.push({ role: "user", content: [{ type: "text", text: trimmed }] });
 }
 
+/**
+ * Build synthetic_context for toolcall injection mode.
+ * Converts the dynamic memory patch text into a fake tool_use/tool_result pair.
+ */
+function buildSyntheticContext(
+  dynamicMemoryPatch: string | null
+): AssembledPrompt["synthetic_context"] | undefined {
+  const trimmed = dynamicMemoryPatch?.trim();
+  if (!trimmed) return undefined;
+  const timestamp = new Date().toISOString();
+  const toolUseId = `toolu_${crypto.randomUUID().replace(/-/g, "")}`;
+  return {
+    tool_name: "memory_context",
+    tool_use_id: toolUseId,
+    tool_result: `[${timestamp}]\n${trimmed}`,
+  };
+}
+
 function splitDynamicMemorySystemBlock(
   assembled: AssembledPrompt
 ): { systemBlocks: AssembledPrompt["system_blocks"]; dynamicMemoryPatch: string | null } {
@@ -610,13 +628,28 @@ export function buildAnthropicRequestFromAssembled(
 
   const { systemBlocks, dynamicMemoryPatch } = splitDynamicMemorySystemBlock(assembled);
   const system = assembledToAnthropicSystem(systemBlocks);
-  const { wire: messages, indexMap } = assembledToAnthropicMessages(assembled.messages);
+
+  // Phase 4: MEMORY_INJECTION_MODE controls how dynamic memory is injected.
+  // "toolcall" → synthetic tool_use/tool_result pair (after all breakpoints)
+  // "text" (default) → append as uncached user context (legacy behavior)
+  const injectionMode = env.MEMORY_INJECTION_MODE === "toolcall" ? "toolcall" : "text";
+  const syntheticContext = injectionMode === "toolcall"
+    ? buildSyntheticContext(dynamicMemoryPatch)
+    : undefined;
+
+  const { wire: messages, indexMap } = assembledToAnthropicMessages(
+    assembled.messages,
+    syntheticContext
+  );
 
   // Apply explicit cache breakpoints (system + message level)
   applyExplicitCacheBreakpoints(system, messages, indexMap, assembled, env);
 
-  // dynamic_memory_patch goes AFTER all cache breakpoints as uncached user context
-  appendUncachedUserContext(messages, dynamicMemoryPatch);
+  // dynamic_memory_patch: in text mode, append AFTER all cache breakpoints.
+  // In toolcall mode, synthetic messages are already appended by assembledToAnthropicMessages.
+  if (injectionMode === "text") {
+    appendUncachedUserContext(messages, dynamicMemoryPatch);
+  }
 
   // Stable tools JSON: keys sorted, so Anthropic's cache sees identical bytes
   const stableToolsJson = tools

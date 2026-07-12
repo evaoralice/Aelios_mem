@@ -102,7 +102,8 @@ export function assembledToAnthropicSystem(
  * merging.
  */
 export function assembledToAnthropicMessages(
-  messages: AssembledPrompt["messages"]
+  messages: AssembledPrompt["messages"],
+  syntheticContext?: AssembledPrompt["synthetic_context"]
 ): { wire: AnthropicWireMessage[]; indexMap: Map<number, number> } {
   const wire: AnthropicWireMessage[] = [];
   const indexMap = new Map<number, number>();
@@ -122,6 +123,28 @@ export function assembledToAnthropicMessages(
 
     wire.push({ role, content: [{ type: "text", text }] });
     indexMap.set(i, wire.length - 1);
+  }
+
+  // Append synthetic tool_use + tool_result pair for memory injection (Phase 4).
+  // These go after all real messages and are never cached.
+  if (syntheticContext) {
+    wire.push({
+      role: "assistant",
+      content: [{
+        type: "tool_use",
+        id: syntheticContext.tool_use_id,
+        name: syntheticContext.tool_name,
+        input: {},
+      } as AnthropicToolUseBlock],
+    });
+    wire.push({
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: syntheticContext.tool_use_id,
+        content: syntheticContext.tool_result,
+      } as AnthropicToolResultBlock],
+    });
   }
 
   if (wire.length === 0) {

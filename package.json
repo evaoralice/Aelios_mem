@@ -8,6 +8,9 @@
     "deploy": "wrangler deploy --keep-vars",
     "setup:cloudflare": "node scripts/setup-cloudflare.mjs",
     "deploy:cloudflare": "npm run setup:cloudflare && wrangler deploy --keep-vars",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:phase1": "vitest run test/phase1/",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && node scripts/verify-assembler.mjs && node scripts/verify-vector-memory-write.mjs && node scripts/verify-extract-pipeline.mjs",
     "vectorize:clean": "node scripts/clean-vectorize-memory.mjs",
@@ -19,7 +22,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250927.0",
+    "@types/node": "^18.19.130",
     "typescript": "^5.9.3",
+    "vitest": "^2.1.9",
     "wrangler": "^4.40.2"
   }
 }

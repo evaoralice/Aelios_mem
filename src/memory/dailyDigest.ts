@@ -21,7 +21,8 @@ import {
   createLongtail,
   upsertDailyLog,
   fetchMemoryLifecycleRows,
-  upsertLongtailEmbedding
+  upsertLongtailEmbedding,
+  DIGEST_MAX_CHARS
 } from "../db/v2";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
@@ -462,7 +463,7 @@ function buildDigestPrompt(input: {
     "",
     "Dream 输出格式：",
     "- title 是 12 字以内标题。",
-    "- summary 写成一段简短自然中文，描述这次 dream 整理出了什么。",
+    "- summary 写成分条列点格式（每条一行，用「- 」开头），概括今天发生了什么、整理了什么。整个 summary 控制在 800 字以内，每条简洁，不要写成一大段。",
     "- sections 最多 3 段，每段有 heading 和 content；没有必要可以给空数组。",
     `- important_excerpts 最多 ${input.excerptLimit} 条，quote 必须是值得保留的原文片段。`,
     "- memories_to_add 保留兼容字段，v2 下默认输出空数组。",
@@ -474,7 +475,7 @@ function buildDigestPrompt(input: {
     JSON.stringify({
       date: input.dateLabel,
       title: "夜间整理",
-      summary: "这次 dream 合并了重复记忆，更新了项目状态，并保留了关键原文。",
+      summary: "- 合并了 2 条重复的项目记忆\n- 更新了用户的作息偏好（从凌晨改为早起）\n- 删除了 1 条过时的调试记忆\n- 保留了 3 段关键原文",
       sections: [{ heading: "整理结果", content: "……" }],
       important_excerpts: [
         {
@@ -797,7 +798,7 @@ async function applyDreamV2(
     ]
       .filter(Boolean)
       .join("\n");
-    await upsertDigest(env.DB, { namespace, content: truncate(digestContent, 500) });
+    await upsertDigest(env.DB, { namespace, content: truncate(digestContent, DIGEST_MAX_CHARS) });
   }
 
   await upsertDailyLog(env.DB, {
@@ -905,7 +906,7 @@ export async function runDailyMemoryDigest(
   }
   const messageIds = messages.map((message) => message.id);
 
-  // v2 path: fact_key upsert + L1 digest + longtail + yesterday_log
+  // v2 path: fact_key upsert + L1 digest + longtail + recent_logs
   if (v2Enabled && strategy !== "legacy") {
     const v2Result = await applyDreamV2(env, {
       namespace,
