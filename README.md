@@ -73,7 +73,7 @@ https://<你的 Worker 地址>/admin
 
 | 标签 | 干什么 |
 |---|---|
-| **今日** | 今天聊了什么、L1 摘要、昨日日志、今日消息、记忆类型统计，一眼看完 |
+| **今日** | 今天聊了什么、L1 摘要、每日日志（最近两天）、今日消息、记忆类型统计，一眼看完 |
 | **审核队列** | AI 每 4 小时自动抽出来的低置信度记忆会到这里，你点**通过 / 丢弃 / 合并 / 取代**，不让垃圾记忆污染记忆库 |
 | **重要记忆** | 所有长期记忆，按类型分页浏览、搜索、编辑、删除 |
 | **更多** | 珍贵记忆（只增不删的原文）、黑话表（术语别名）、世界知识、维护工具 |
@@ -216,7 +216,7 @@ workers-ai/@cf/...         → env.AI.run（不走 AI Gateway）
 | GET / PATCH / DELETE | `/v1/memories/:id` `/v1/memory/:id` | 单条记忆操作 |
 | POST | `/v1/search/memories` | 记忆搜索（召回用，可被压缩加工；`filter:false` 跳 reranker，`include_prompt:true` 拿可注入文本） |
 | POST | `/v1/ingest/messages` `/v1/messages/ingest` | 写入原始聊天（v2 只落 raw，不触发旧抽取） |
-| GET / PATCH | `/v1/memory_boot` | 冷启动包：digest + 昨日日志 + precious + glossary + longtail + 今日消息 + 统计；PATCH 写 L1 摘要 |
+| GET / PATCH | `/v1/memory_boot` | 冷启动包：digest + 每日日志（最近两天）+ precious + glossary + longtail + 今日消息 + 统计；PATCH 写 L1 摘要 |
 | GET / POST / DELETE | `/v1/precious` `/v1/precious/:id` | 珍贵记忆（只增不删的原文） |
 | GET / POST / PATCH / DELETE | `/v1/glossary` `/v1/glossary/:id` | 黑话表（term + aliases + definition） |
 | GET | `/v1/candidates` | 候选审核队列列表（`status` 默认 pending） |

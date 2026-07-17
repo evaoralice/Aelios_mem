@@ -96,7 +96,7 @@ assert.match(recallSource, /if \(hit\.score >= minScore\) return true;\s+floored
 assert.match(recallSource, /floored_ids: flooredIds,\s+floored_count: flooredIds\.length,\s+min_score: minScore,/s);
 assert.match(mcpSource, /min_score: \{ type: "number", minimum: 0, maximum: 1 \}/);
 assert.match(mcpSource, /min_score: typeof args\.min_score === "number" \? readNumber\(args\.min_score, 0\.15\) : undefined/);
-assert.match(wranglerSource, /crons = \["0 \*\/4 \* \* \*", "10 20 \* \* \*"\]/);
+assert.match(wranglerSource, /crons = \["0 \*\/4 \* \* \*", "0 19 \* \* \*"\]/);
 assert.match(wranglerSource, /EXTRACT_MODEL = "deepseek\/deepseek-v4-flash"/);
 assert.match(wranglerSource, /DEDUP_COSINE = "0\.9"/);
 assert.match(indexSource, /const EXTRACT_CRON = "0 \*\/4 \* \* \*"/);

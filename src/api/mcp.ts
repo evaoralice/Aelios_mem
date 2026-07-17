@@ -196,7 +196,7 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "memory_boot",
       description:
-        "Cold-start package: L1 digest + yesterday log + top pinned precious + all glossary. " +
+        "Cold-start package: L1 digest + recent daily logs + top pinned precious + all glossary. " +
         "Output is stable and deterministically ordered so the client can cache it. " +
         "Call once on SessionStart.",
       inputSchema: {
