@@ -22,6 +22,7 @@ import { applyRegexRules } from "../preset/regexPipeline";
 import type { Env, OpenAIChatMessage, OpenAIChatRequest, OpenAIChatResponse } from "../types";
 import { openAiError } from "../utils/json";
 import { hasImageContent } from "../utils/messages";
+import { readString } from "../utils/request";
 
 function extractAssistantText(response: OpenAIChatResponse): string {
   const message = response.choices?.[0]?.message;
@@ -84,8 +85,13 @@ export async function handleChatCompletions(
 
   const provider = classifyProvider(targetModel);
 
+  const requestRoleId = readString(body.role_id) ?? null;
+  const requestRoleName = readString(body.role_name) ?? null;
+
   const conversation = await getOrCreateConversation(env.DB, {
-    namespace: auth.profile.namespace
+    namespace: auth.profile.namespace,
+    roleId: requestRoleId,
+    roleName: requestRoleName
   });
 
   const savedUserMessageIds = await saveUserMessages(env.DB, {
@@ -96,7 +102,9 @@ export async function handleChatCompletions(
     requestModel: body.model,
     upstreamModel: targetModel,
     upstreamProvider: provider,
-    stream: Boolean(body.stream)
+    stream: Boolean(body.stream),
+    roleId: requestRoleId,
+    roleName: requestRoleName
   });
   const latestUserMessageId = savedUserMessageIds[savedUserMessageIds.length - 1];
 
@@ -241,7 +249,9 @@ export async function handleChatCompletions(
       finishReason: parsed.finishReason,
       usage: parsed.usage,
       cacheMode: anthropicCacheMode,
-      cacheTtl: env.ANTHROPIC_CACHE_TTL || "5m"
+      cacheTtl: env.ANTHROPIC_CACHE_TTL || "5m",
+      roleId: requestRoleId,
+      roleName: requestRoleName
     });
 
     ctx.waitUntil(

@@ -36,7 +36,8 @@ describe("getRecentDailyLogs", () => {
     });
 
     await getRecentDailyLogs(db, { namespace: "user42", limit: 2 });
-    expect(capturedArgs).toEqual(["user42", 2]);
+    // roleScope defaults to "shared", so bind args = [namespace, roleScope, limit]
+    expect(capturedArgs).toEqual(["user42", "shared", 2]);
   });
 
   it("returns empty array when no logs exist", async () => {

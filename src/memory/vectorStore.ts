@@ -17,6 +17,9 @@ export interface VectorMemoryInput {
   source?: string | null;
   sourceMessageIds?: string[];
   expiresAt?: string | null;
+  roleId?: string | null;
+  roleName?: string | null;
+  roleScope?: string;
 }
 
 export interface VectorMemoryPatch {
@@ -100,7 +103,10 @@ function toMetadata(input: Required<VectorMemoryInput> & { id: string; vectorId:
     source_message_ids: JSON.stringify(input.sourceMessageIds),
     created_at: input.createdAt,
     updated_at: input.updatedAt,
-    expires_at: input.expiresAt || ""
+    expires_at: input.expiresAt || "",
+    role_id: input.roleId || "",
+    role_name: input.roleName || "",
+    role_scope: input.roleScope || "shared"
   };
 }
 
@@ -138,7 +144,10 @@ export function vectorMetadataToMemoryRecord(
     created_at: readString(metadata.created_at) || now,
     updated_at: readString(metadata.updated_at) || readString(metadata.created_at) || now,
     expires_at: readString(metadata.expires_at),
-    ...(score === undefined ? {} : { score })
+    ...(score === undefined ? {} : { score }),
+    role_id: readString(metadata.role_id) ?? null,
+    role_name: readString(metadata.role_name) ?? null,
+    role_scope: readString(metadata.role_scope) || "shared"
   };
 }
 
@@ -365,6 +374,9 @@ export async function createVectorMemory(env: Env, input: VectorMemoryInput): Pr
     source: input.source ?? null,
     sourceMessageIds: input.sourceMessageIds ?? [],
     expiresAt: input.expiresAt ?? null,
+    roleId: input.roleId ?? null,
+    roleName: input.roleName ?? null,
+    roleScope: input.roleScope ?? "shared",
     id,
     vectorId,
     createdAt: now,
@@ -434,6 +446,9 @@ export async function deleteVectorMemory(env: Env, id: string): Promise<boolean>
               source: existing.source ?? null,
               sourceMessageIds: existing.source_message_ids,
               expiresAt: existing.expires_at ?? null,
+              roleId: existing.role_id ?? null,
+              roleName: existing.role_name ?? null,
+              roleScope: existing.role_scope ?? "shared",
               id: existing.id,
               vectorId: existing.vector_id,
               createdAt: existing.created_at,
@@ -487,6 +502,9 @@ export async function updateVectorMemory(
     source: patch.source === undefined ? existing.source : patch.source,
     sourceMessageIds: patch.sourceMessageIds ?? existing.source_message_ids,
     expiresAt: patch.expiresAt === undefined ? existing.expires_at : patch.expiresAt,
+    roleId: existing.role_id ?? null,
+    roleName: existing.role_name ?? null,
+    roleScope: existing.role_scope ?? "shared",
     id: existing.id,
     vectorId,
     createdAt: existing.created_at,

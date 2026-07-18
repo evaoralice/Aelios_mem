@@ -41,6 +41,12 @@ export interface Env {
   RECALL_SOURCE_BOOST?: string;
   // 记忆注入方式: "text" (默认, 追加文本) | "toolcall" (伪造 tool call)
   MEMORY_INJECTION_MODE?: string;
+  // 角色记忆总开关，默认 false（全部走 shared）
+  ROLE_MEMORY_ENABLED?: string;
+  // 召回角色加权: role_id 精确匹配，默认 1.3
+  RECALL_ROLE_BOOST_EXACT?: string;
+  // 召回角色加权: role_name 兜底匹配，默认 1.1
+  RECALL_ROLE_BOOST_NAME?: string;
   ENABLE_DAILY_MEMORY_DIGEST?: string;
   DREAM_NAMESPACE?: string;
   DREAM_MAX_MESSAGES?: string;
@@ -199,6 +205,8 @@ export interface Conversation {
   namespace: string;
   created_at: string;
   updated_at: string;
+  role_id?: string | null;
+  role_name?: string | null;
 }
 
 export interface MessageRecord {
@@ -209,6 +217,8 @@ export interface MessageRecord {
   content: string;
   source: string | null;
   created_at: string;
+  role_id?: string | null;
+  role_name?: string | null;
 }
 
 export interface MemoryRecord {
@@ -230,6 +240,9 @@ export interface MemoryRecord {
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+  role_id?: string | null;
+  role_name?: string | null;
+  role_scope?: string;
 }
 
 // v2 字段侧车表 (母帖 #11 第 1 步，sidecar 版)。
@@ -246,6 +259,7 @@ export interface MemoryLifecycleRow {
   last_seen_at: string | null;
   seen_count: number;
   last_injected_at: string | null;
+  role_scope?: string;
 }
 
 export interface MemoryApiRecord {
@@ -277,4 +291,8 @@ export interface MemoryApiRecord {
   last_seen_at?: string | null;
   seen_count?: number;
   last_injected_at?: string | null;
+  // --- 角色字段 (可选) ---
+  role_id?: string | null;
+  role_name?: string | null;
+  role_scope?: string;
 }

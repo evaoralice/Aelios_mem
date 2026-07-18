@@ -10,6 +10,7 @@ import { upsertMemoryEmbedding } from "../memory/embedding";
 import type { Env, MemoryLifecycleRow, MemoryRecord } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
+import { computeRoleScope } from "../utils/role";
 
 // 读取一条完整 MemoryRecord 用于向量同步。v2 写完 D1 后用它拿全字段。
 async function fetchMemoryForSync(
@@ -614,19 +615,20 @@ export async function fetchMemoryLifecycleRows(
 // 同时写 D1 (本体) 和 Vectorize (检索镜像)，设 vector_id，否则 recall 召不到。
 export async function upsertMemoryByFactKey(
   env: Env,
-  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null }
+  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null; roleId?: string | null; roleName?: string | null }
 ): Promise<{ id: string; created: boolean }> {
   const db = env.DB;
   const now = nowIso();
+  const roleScope = computeRoleScope(input.roleId, input.roleName);
 
-  // 先查同 fact_key 的 active memory：memories join 侧车表。
+  // 先查同 fact_key + 同 role_scope 的 active memory：memories join 侧车表。
   const existing = await db
     .prepare(
       `SELECT m.id FROM memories m
        JOIN memory_lifecycle lc ON lc.memory_id = m.id
-       WHERE m.namespace = ? AND m.status = 'active' AND lc.fact_key = ?`
+       WHERE m.namespace = ? AND m.status = 'active' AND lc.fact_key = ? AND m.role_scope = ?`
     )
-    .bind(input.namespace, input.factKey)
+    .bind(input.namespace, input.factKey, roleScope)
     .first<{ id: string }>();
 
   if (existing) {
@@ -668,8 +670,9 @@ export async function upsertMemoryByFactKey(
     .prepare(
       `INSERT INTO memories (
         id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null)`
+        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        role_id, role_name, role_scope
+      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
     )
     .bind(
       id,
@@ -683,17 +686,20 @@ export async function upsertMemoryByFactKey(
       JSON.stringify(input.sourceMessageIds ?? []),
       vectorId,
       now,
-      now
+      now,
+      input.roleId ?? null,
+      input.roleName ?? null,
+      roleScope
     )
     .run();
 
   await db
     .prepare(
       `INSERT INTO memory_lifecycle (
-        memory_id, namespace, fact_key, valid_as_of, last_seen_at, seen_count, last_injected_at
-      ) VALUES (?, ?, ?, ?, ?, 0, NULL)`
+        memory_id, namespace, fact_key, valid_as_of, last_seen_at, seen_count, last_injected_at, role_scope
+      ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?)`
     )
-    .bind(id, input.namespace, input.factKey, input.validAsOf ?? null, now)
+    .bind(id, input.namespace, input.factKey, input.validAsOf ?? null, now, roleScope)
     .run();
 
   await syncMemoryVector(env, { namespace: input.namespace, id });
@@ -710,18 +716,19 @@ export interface ActiveFactKeyMemory {
 
 export async function getActiveMemoryByFactKey(
   db: D1Database,
-  input: { namespace: string; factKey: string }
+  input: { namespace: string; factKey: string; roleScope?: string }
 ): Promise<ActiveFactKeyMemory | null> {
+  const roleScope = input.roleScope ?? "shared";
   const row = await db
     .prepare(
       `SELECT m.id, m.namespace, m.type, m.content, lc.fact_key
        FROM memories m
        JOIN memory_lifecycle lc ON lc.memory_id = m.id
-       WHERE m.namespace = ? AND m.status = 'active' AND lc.fact_key = ?
+       WHERE m.namespace = ? AND m.status = 'active' AND lc.fact_key = ? AND m.role_scope = ?
        ORDER BY m.updated_at DESC
        LIMIT 1`
     )
-    .bind(input.namespace, input.factKey)
+    .bind(input.namespace, input.factKey, roleScope)
     .first<ActiveFactKeyMemory>();
   return row ?? null;
 }
@@ -779,15 +786,24 @@ export async function supersedeMemory(
     tags?: string[];
     source?: string | null;
     sourceMessageIds?: string[];
+    roleId?: string | null;
+    roleName?: string | null;
   }
 ): Promise<{ oldStatus: string; newId: string }> {
   const db = env.DB;
   const now = nowIso();
   const old = await db
-    .prepare("SELECT id, status, vector_id FROM memories WHERE namespace = ? AND id = ?")
+    .prepare("SELECT id, status, vector_id, role_scope, role_id, role_name FROM memories WHERE namespace = ? AND id = ?")
     .bind(input.namespace, input.oldId)
-    .first<{ id: string; status: string; vector_id: string | null }>();
+    .first<{ id: string; status: string; vector_id: string | null; role_scope: string; role_id: string | null; role_name: string | null }>();
   if (!old) throw new Error("memory to supersede not found");
+
+  // 继承旧记忆的 role_scope + role_id + role_name，除非显式传了新值
+  const roleId = input.roleId !== undefined ? input.roleId : old.role_id;
+  const roleName = input.roleName !== undefined ? input.roleName : old.role_name;
+  const roleScope = input.roleId !== undefined || input.roleName !== undefined
+    ? computeRoleScope(input.roleId, input.roleName)
+    : old.role_scope;
 
   const nextId = newId("mem");
   const nextVectorId = `mem_${nextId}`;
@@ -806,13 +822,14 @@ export async function supersedeMemory(
     .bind(nextId, input.reason ?? null, old.id)
     .run();
 
-  // 2. 插新条目 (memories 本体，v1 列)
+  // 2. 插新条目 (memories 本体，v1 列 + role 字段)
   await db
     .prepare(
       `INSERT INTO memories (
         id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null)`
+        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        role_id, role_name, role_scope
+      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
     )
     .bind(
       nextId,
@@ -826,17 +843,20 @@ export async function supersedeMemory(
       JSON.stringify(input.sourceMessageIds ?? []),
       nextVectorId,
       now,
-      now
+      now,
+      roleId,
+      roleName,
+      roleScope
     )
     .run();
-  // 新条目侧车行记 supersedes_id + fact_key + valid_as_of
+  // 新条目侧车行记 supersedes_id + fact_key + valid_as_of + role_scope
   await db
     .prepare(
       `INSERT INTO memory_lifecycle (
-        memory_id, namespace, fact_key, supersedes_id, review_reason, valid_as_of, last_seen_at, seen_count, last_injected_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)`
+        memory_id, namespace, fact_key, supersedes_id, review_reason, valid_as_of, last_seen_at, seen_count, last_injected_at, role_scope
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)`
     )
-    .bind(nextId, input.namespace, newFactKey, old.id, input.reason ?? null, input.validAsOf ?? null, now)
+    .bind(nextId, input.namespace, newFactKey, old.id, input.reason ?? null, input.validAsOf ?? null, now, roleScope)
     .run();
 
   // 3. 同步向量：新条目 upsert，旧条目下架
@@ -974,6 +994,7 @@ export async function listActiveMemories(
 
 export interface DailyLogRow {
   namespace: string;
+  role_scope: string;
   date: string;
   title: string;
   summary: string;
@@ -982,39 +1003,42 @@ export interface DailyLogRow {
 
 export async function getDailyLog(
   db: D1Database,
-  input: { namespace: string; date: string }
+  input: { namespace: string; date: string; roleScope?: string }
 ): Promise<DailyLogRow | null> {
+  const roleScope = input.roleScope ?? "shared";
   const row = await db
-    .prepare("SELECT namespace, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND date = ?")
-    .bind(input.namespace, input.date)
+    .prepare("SELECT namespace, role_scope, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? AND date = ?")
+    .bind(input.namespace, roleScope, input.date)
     .first<DailyLogRow>();
   return row ?? null;
 }
 
 export async function getRecentDailyLogs(
   db: D1Database,
-  input: { namespace: string; limit: number }
+  input: { namespace: string; limit: number; roleScope?: string }
 ): Promise<DailyLogRow[]> {
+  const roleScope = input.roleScope ?? "shared";
   const result = await db
-    .prepare("SELECT namespace, date, title, summary, updated_at FROM daily_log WHERE namespace = ? ORDER BY date DESC LIMIT ?")
-    .bind(input.namespace, input.limit)
+    .prepare("SELECT namespace, role_scope, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? ORDER BY date DESC LIMIT ?")
+    .bind(input.namespace, roleScope, input.limit)
     .all<DailyLogRow>();
   return result.results ?? [];
 }
 
 export async function upsertDailyLog(
   db: D1Database,
-  input: { namespace: string; date: string; title: string; summary: string }
+  input: { namespace: string; date: string; title: string; summary: string; roleScope?: string }
 ): Promise<DailyLogRow> {
   const now = nowIso();
+  const roleScope = input.roleScope ?? "shared";
   await db
     .prepare(
-      `INSERT INTO daily_log (namespace, date, title, summary, updated_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, date) DO UPDATE SET title = excluded.title, summary = excluded.summary, updated_at = excluded.updated_at`
+      `INSERT INTO daily_log (namespace, role_scope, date, title, summary, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, role_scope, date) DO UPDATE SET title = excluded.title, summary = excluded.summary, updated_at = excluded.updated_at`
     )
-    .bind(input.namespace, input.date, input.title, input.summary, now)
+    .bind(input.namespace, roleScope, input.date, input.title, input.summary, now)
     .run();
-  return { namespace: input.namespace, date: input.date, title: input.title, summary: input.summary, updated_at: now };
+  return { namespace: input.namespace, role_scope: roleScope, date: input.date, title: input.title, summary: input.summary, updated_at: now };
 }
 
 // =====================================================================
@@ -1042,4 +1066,106 @@ export async function upsertLongtailEmbedding(
       }
     }
   ]);
+}
+
+// =====================================================================
+// 记忆变更日志 (memory_changelog) — 对话模型通过 memory_change_* 工具提交
+// =====================================================================
+
+export interface MemoryChangelogRow {
+  id: string;
+  namespace: string;
+  role_scope: string;
+  op: "add" | "update" | "delete";
+  target_id: string | null;
+  before_content: string | null;
+  after_content: string | null;
+  payload_json: string;
+  target_version: string | null;
+  reason: string | null;
+  role_id: string | null;
+  role_name: string | null;
+  created_at: string;
+  status: "pending" | "applied" | "conflict" | "rejected";
+  error_message: string | null;
+  applied_at: string | null;
+}
+
+export async function createChangelogEntry(
+  db: D1Database,
+  input: {
+    namespace: string;
+    roleScope?: string;
+    op: "add" | "update" | "delete";
+    targetId?: string | null;
+    beforeContent?: string | null;
+    afterContent?: string | null;
+    payloadJson: string;
+    targetVersion?: string | null;
+    reason?: string | null;
+    roleId?: string | null;
+    roleName?: string | null;
+  }
+): Promise<MemoryChangelogRow> {
+  const id = newId("chg");
+  const now = nowIso();
+  const roleScope = input.roleScope ?? computeRoleScope(input.roleId, input.roleName);
+  await db
+    .prepare(
+      `INSERT INTO memory_changelog (
+        id, namespace, role_scope, op, target_id, before_content, after_content,
+        payload_json, target_version, reason, role_id, role_name, created_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+    )
+    .bind(
+      id,
+      input.namespace,
+      roleScope,
+      input.op,
+      input.targetId ?? null,
+      input.beforeContent ?? null,
+      input.afterContent ?? null,
+      input.payloadJson,
+      input.targetVersion ?? null,
+      input.reason ?? null,
+      input.roleId ?? null,
+      input.roleName ?? null,
+      now
+    )
+    .run();
+  return {
+    id,
+    namespace: input.namespace,
+    role_scope: roleScope,
+    op: input.op,
+    target_id: input.targetId ?? null,
+    before_content: input.beforeContent ?? null,
+    after_content: input.afterContent ?? null,
+    payload_json: input.payloadJson,
+    target_version: input.targetVersion ?? null,
+    reason: input.reason ?? null,
+    role_id: input.roleId ?? null,
+    role_name: input.roleName ?? null,
+    created_at: now,
+    status: "pending",
+    error_message: null,
+    applied_at: null,
+  };
+}
+
+export async function listPendingChangelog(
+  db: D1Database,
+  input: { namespace: string; roleScope?: string; limit?: number }
+): Promise<MemoryChangelogRow[]> {
+  const roleScope = input.roleScope ?? "shared";
+  const limit = input.limit ?? 10;
+  const result = await db
+    .prepare(
+      `SELECT * FROM memory_changelog
+       WHERE namespace = ? AND role_scope = ? AND status = 'pending'
+       ORDER BY created_at ASC LIMIT ?`
+    )
+    .bind(input.namespace, roleScope, limit)
+    .all<MemoryChangelogRow>();
+  return result.results ?? [];
 }

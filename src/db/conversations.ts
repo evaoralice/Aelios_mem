@@ -40,11 +40,12 @@ export async function setProcessingCursor(
 
 export async function getOrCreateConversation(
   db: D1Database,
-  input: { namespace: string; id?: string }
+  input: { namespace: string; id?: string; roleId?: string | null; roleName?: string | null }
 ): Promise<Conversation> {
-  const id = input.id || `${input.namespace}:default`;
+  const suffix = input.id || (input.roleId ?? "default");
+  const id = `${input.namespace}:${suffix}`;
   const existing = await db
-    .prepare("SELECT id, namespace, created_at, updated_at FROM conversations WHERE id = ?")
+    .prepare("SELECT id, namespace, created_at, updated_at, role_id, role_name FROM conversations WHERE id = ?")
     .bind(id)
     .first<Conversation>();
 
@@ -55,12 +56,14 @@ export async function getOrCreateConversation(
     id,
     namespace: input.namespace,
     created_at: now,
-    updated_at: now
+    updated_at: now,
+    role_id: input.roleId ?? null,
+    role_name: input.roleName ?? null
   };
 
   await db
-    .prepare("INSERT INTO conversations (id, namespace, created_at, updated_at) VALUES (?, ?, ?, ?)")
-    .bind(conversation.id, conversation.namespace, conversation.created_at, conversation.updated_at)
+    .prepare("INSERT INTO conversations (id, namespace, created_at, updated_at, role_id, role_name) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(conversation.id, conversation.namespace, conversation.created_at, conversation.updated_at, conversation.role_id, conversation.role_name)
     .run();
 
   return conversation;

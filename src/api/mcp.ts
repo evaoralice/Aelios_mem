@@ -5,6 +5,7 @@ import { saveIngestMessages } from "../db/messages";
 import {
   archiveMemory,
   createPrecious,
+  createChangelogEntry,
   deleteMemoryV2,
   fetchMemoryLifecycleRows,
   getDigest,
@@ -111,7 +112,9 @@ function getTools(): Array<Record<string, unknown>> {
           query: { type: "string" },
           top_k: { type: "number", minimum: 1, maximum: 50 },
           types: { type: "array", items: { type: "string" } },
-          namespace: { type: "string" }
+          namespace: { type: "string" },
+          role_id: { type: "string" },
+          role_name: { type: "string" }
         },
         required: ["query"]
       }
@@ -220,7 +223,9 @@ function getTools(): Array<Record<string, unknown>> {
           k: { type: "number", minimum: 1, maximum: 100 },
           min_score: { type: "number", minimum: 0, maximum: 1 },
           types: { type: "array", items: { type: "string" } },
-          namespace: { type: "string" }
+          namespace: { type: "string" },
+          role_id: { type: "string" },
+          role_name: { type: "string" }
         },
         required: ["query"]
       }
@@ -279,9 +284,67 @@ function getTools(): Array<Record<string, unknown>> {
           tags: { type: "array", items: { type: "string" } },
           source: { type: "string" },
           valid_as_of: { type: "string" },
-          namespace: { type: "string" }
+          namespace: { type: "string" },
+          role_id: { type: "string", description: "角色 ID。不传存为共享记忆。" },
+          role_name: { type: "string", description: "角色名称。无 role_id 时用于兜底 scope。" }
         },
         required: ["fact_key", "content"]
+      }
+    },
+    {
+      name: "memory_change_add",
+      description:
+        "提交新增记忆的变更日志（pending）。凌晨做梦时由代码应用。白天不直接写 memories。" +
+        "role_id/role_name 使用规则：记录角色特征/偏好/设定 → 传；记录用户通用信息 → 不传。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          content: { type: "string" },
+          type: { 
+            type: "string",
+            description: "Memory type. One of: fact, event, preference, relationship, boundary, habit, decision, note, world_fact.",
+          },
+          importance: { type: "number" },
+          role_id: { 
+            type: "string",
+            description: "记录角色自己的特征/偏好/设定/关系时传 role_id；记录用户通用信息时不传。不要把从记忆召回中读到的信息重新写入。",
+          },
+          role_name: { type: "string" },
+          reason: { type: "string" }
+        },
+        required: ["content"]
+      }
+    },
+    {
+      name: "memory_change_update",
+      description:
+        "提交修改记忆的变更日志（pending）。凌晨做梦时由代码应用。" +
+        "需要目标记忆的 target_id。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target_id: { type: "string" },
+          content: { type: "string" },
+          type: { type: "string" },
+          importance: { type: "number" },
+          role_id: { type: "string" },
+          role_name: { type: "string" },
+          reason: { type: "string" }
+        },
+        required: ["target_id", "content"]
+      }
+    },
+    {
+      name: "memory_change_delete",
+      description:
+        "提交删除记忆的变更日志（pending）。凌晨做梦时由代码应用。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target_id: { type: "string" },
+          reason: { type: "string" }
+        },
+        required: ["target_id"]
       }
     },
     {
@@ -620,9 +683,68 @@ export async function callTool(
       confidence: readNumber(args.confidence, 0.8),
       tags: readStringArray(args.tags),
       source: readString(args.source) || "mcp",
-      validAsOf: readString(args.valid_as_of)
+      validAsOf: readString(args.valid_as_of),
+      roleId: readString(args.role_id) ?? null,
+      roleName: readString(args.role_name) ?? null
     });
     return textToolResult({ data: result });
+  }
+
+  if (params.name === "memory_change_add") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const content = readString(args.content);
+    if (!content) return toolError("content is required");
+    const row = await createChangelogEntry(env.DB, {
+      namespace: resolveNamespace(profile, args.namespace),
+      op: "add",
+      afterContent: content,
+      payloadJson: JSON.stringify({
+        content,
+        type: readString(args.type) || "fact",
+        importance: readNumber(args.importance, 0.6),
+      }),
+      reason: readString(args.reason) ?? null,
+      roleId: readString(args.role_id) ?? null,
+      roleName: readString(args.role_name) ?? null,
+    });
+    return textToolResult({ data: row });
+  }
+
+  if (params.name === "memory_change_update") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const targetId = readString(args.target_id);
+    const content = readString(args.content);
+    if (!targetId) return toolError("target_id is required");
+    if (!content) return toolError("content is required");
+    const row = await createChangelogEntry(env.DB, {
+      namespace: resolveNamespace(profile, args.namespace),
+      op: "update",
+      targetId,
+      afterContent: content,
+      payloadJson: JSON.stringify({
+        content,
+        type: readString(args.type),
+        importance: readNumber(args.importance, 0.6),
+      }),
+      reason: readString(args.reason) ?? null,
+      roleId: readString(args.role_id) ?? null,
+      roleName: readString(args.role_name) ?? null,
+    });
+    return textToolResult({ data: row });
+  }
+
+  if (params.name === "memory_change_delete") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const targetId = readString(args.target_id);
+    if (!targetId) return toolError("target_id is required");
+    const row = await createChangelogEntry(env.DB, {
+      namespace: resolveNamespace(profile, args.namespace),
+      op: "delete",
+      targetId,
+      payloadJson: JSON.stringify({}),
+      reason: readString(args.reason) ?? null,
+    });
+    return textToolResult({ data: row });
   }
 
   if (params.name === "memory_supersede") {

@@ -1,5 +1,14 @@
 import { vi } from "vitest";
 
+// Polyfill crypto.randomUUID for Node 18 test environment
+const _gt = globalThis as any;
+if (!_gt.crypto?.randomUUID) {
+  _gt.crypto = {
+    ..._gt.crypto,
+    randomUUID: () => "00000000-0000-4000-8000-000000000000",
+  };
+}
+
 /**
  * Mock D1Database for unit tests.
  *

@@ -27,6 +27,8 @@ export async function saveUserMessages(
     upstreamModel: string;
     upstreamProvider: string;
     stream: boolean;
+    roleId?: string | null;
+    roleName?: string | null;
   }
 ): Promise<string[]> {
   const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
@@ -43,8 +45,8 @@ export async function saveUserMessages(
       .prepare(
         `INSERT INTO messages (
           id, conversation_id, namespace, role, content, source, client_message_hash,
-          upstream_model, upstream_provider, request_model, stream, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          upstream_model, upstream_provider, request_model, stream, created_at, role_id, role_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         id,
@@ -58,7 +60,9 @@ export async function saveUserMessages(
         input.upstreamProvider,
         input.requestModel,
         input.stream ? 1 : 0,
-        nowIso()
+        nowIso(),
+        input.roleId ?? null,
+        input.roleName ?? null
       )
       .run();
   }
@@ -81,6 +85,8 @@ export async function saveAssistantMessage(
     usage?: TokenUsage;
     cacheMode?: string | null;
     cacheTtl?: string | null;
+    roleId?: string | null;
+    roleName?: string | null;
   }
 ): Promise<string> {
   const id = newId("msg");
@@ -92,8 +98,8 @@ export async function saveAssistantMessage(
         id, conversation_id, namespace, role, content, source, upstream_model,
         upstream_provider, request_model, stream, finish_reason, token_input,
         token_output, cache_mode, cache_ttl, cache_hit, cache_read_tokens,
-        cache_creation_tokens, raw_usage_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        cache_creation_tokens, raw_usage_json, created_at, role_id, role_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -115,7 +121,9 @@ export async function saveAssistantMessage(
       usage.cache_read_input_tokens ?? null,
       usage.cache_creation_input_tokens ?? null,
       JSON.stringify(usage),
-      nowIso()
+      nowIso(),
+      input.roleId ?? null,
+      input.roleName ?? null
     )
     .run();
 
@@ -201,7 +209,7 @@ export async function listMessagesByNamespaceInRange(
     limit: number;
   }
 ): Promise<MessageRecord[]> {
-  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at
+  let sql = `SELECT id, conversation_id, namespace, role, content, source, created_at, role_id, role_name
              FROM messages
              WHERE namespace = ?
                AND role IN ('user', 'assistant')
