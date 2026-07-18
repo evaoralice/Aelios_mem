@@ -1,5 +1,5 @@
 import { buildStableMemoryPack } from "../memory/stablePack";
-import type { AssembledPrompt } from "../assembler/types";
+import type { AssembledPrompt, PendingChange } from "../assembler/types";
 import {
   assembledToAnthropicMessages,
   assembledToAnthropicSystem,
@@ -209,16 +209,32 @@ function appendUncachedUserContext(
  * Converts the dynamic memory patch text into a fake tool_use/tool_result pair.
  */
 function buildSyntheticContext(
-  dynamicMemoryPatch: string | null
+  dynamicMemoryPatch: string | null,
+  pendingChanges?: PendingChange[]
 ): AssembledPrompt["synthetic_context"] | undefined {
   const trimmed = dynamicMemoryPatch?.trim();
-  if (!trimmed) return undefined;
+  const hasChanges = pendingChanges && pendingChanges.length > 0;
+  if (!trimmed && !hasChanges) return undefined;
   const timestamp = new Date().toISOString();
   const toolUseId = `toolu_${crypto.randomUUID().replace(/-/g, "")}`;
+  const lines = [`[${timestamp}]`];
+  if (trimmed) {
+    lines.push("=== 召回记忆 ===");
+    lines.push(trimmed);
+  }
+  if (hasChanges) {
+    lines.push("=== 待处理变更（今日）===");
+    for (const c of pendingChanges!) {
+      const desc = c.op === "delete"
+        ? `删除记忆 ${c.target_id}`
+        : `${c.op === "add" ? "新增" : "修改"} ${c.after_content ?? ""}`;
+      lines.push(desc);
+    }
+  }
   return {
     tool_name: "memory_context",
     tool_use_id: toolUseId,
-    tool_result: `[${timestamp}]\n${trimmed}`,
+    tool_result: lines.join("\n"),
   };
 }
 
@@ -634,7 +650,7 @@ export function buildAnthropicRequestFromAssembled(
   // "text" (default) → append as uncached user context (legacy behavior)
   const injectionMode = env.MEMORY_INJECTION_MODE === "toolcall" ? "toolcall" : "text";
   const syntheticContext = injectionMode === "toolcall"
-    ? buildSyntheticContext(dynamicMemoryPatch)
+    ? buildSyntheticContext(dynamicMemoryPatch, assembled.pending_changes)
     : undefined;
 
   const { wire: messages, indexMap } = assembledToAnthropicMessages(

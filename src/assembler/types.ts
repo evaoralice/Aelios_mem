@@ -113,10 +113,18 @@ export interface SyntheticContext {
   tool_result: string;
 }
 
+export interface PendingChange {
+  op: string;
+  after_content: string | null;
+  target_id: string | null;
+  reason: string | null;
+}
+
 export interface AssembledPrompt {
   system_blocks: SystemBlock[];
   messages: Array<{ role: "user" | "assistant"; content: string | unknown[] | null }>;
   synthetic_context?: SyntheticContext;
+  pending_changes?: PendingChange[];
   meta: {
     anchor_index: number;
     block_ids: string[];
@@ -162,6 +170,16 @@ export const PERSONA_MEMORY_TYPES: readonly string[] = ["identity", "persona"] a
 
 export function formatBootStable(boot: BootPackage): string {
   const parts: string[] = [];
+  if (boot.baselines && boot.baselines.length > 0) {
+    const baselineEntries: string[] = [];
+    for (const b of boot.baselines) {
+      if (b.role_scope !== "shared") {
+        baselineEntries.push(`[${b.role_scope}]`);
+      }
+      baselineEntries.push(b.content);
+    }
+    parts.push("<long_term_baselines>", ...baselineEntries, "</long_term_baselines>");
+  }
   if (boot.digest) {
     parts.push("<digest>", boot.digest.content, "</digest>");
   }

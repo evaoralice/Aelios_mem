@@ -13,6 +13,7 @@
 import {
   getDigest,
   getRecentDailyLogs,
+  getBaselines,
   listPrecious,
   listGlossary,
   matchGlossary,
@@ -49,6 +50,20 @@ function readRecallMinScore(env: Env, override?: number): number {
 function readSourceBoost(env: Env): number {
   const raw = Number(env.RECALL_SOURCE_BOOST ?? "1.0");
   return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+}
+
+function readRoleBoostExact(env: Env): number {
+  const raw = Number(env.RECALL_ROLE_BOOST_EXACT ?? "1.3");
+  return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+}
+
+function readRoleBoostName(env: Env): number {
+  const raw = Number(env.RECALL_ROLE_BOOST_NAME ?? "1.1");
+  return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+}
+
+function normalizeName(s: string): string {
+  return s.trim().normalize("NFKC").toLowerCase();
 }
 
 function decayForLastInjected(
@@ -146,6 +161,7 @@ export interface BootPackage {
   recent_logs: Array<{ date: string; title: string; summary: string }>;
   precious: Array<{ id: string; content: string; created_at: string }>;
   glossary: Array<{ term: string; definition: string; aliases: string[] }>;
+  baselines: Array<{ role_scope: string; content: string; version: number }>;
   schema_version: string;
   cache_prefix_end: true;
 }
@@ -191,11 +207,20 @@ export async function buildBootPackage(
     summary: r.summary
   }));
 
+  // 长期基线文本
+  const baselineRows = await getBaselines(env.DB, { namespace: input.namespace });
+  const baselines = baselineRows.map((b) => ({
+    role_scope: b.role_scope,
+    content: b.content,
+    version: b.version,
+  }));
+
   return {
     digest: digest ? { content: digest.content, updated_at: digest.updated_at } : null,
     recent_logs,
     precious,
     glossary: allGlossary,
+    baselines,
     schema_version: BOOT_SCHEMA_VERSION,
     cache_prefix_end: true
   };
@@ -245,6 +270,9 @@ export interface RecallInput {
   k?: number;
   types?: string[];
   min_score?: number;
+  // 角色加权: 传入当前角色信息，召回时对匹配的记忆加权
+  role_id?: string | null;
+  role_name?: string | null;
   // 闸二: 调用方传 boot 包的核心层指纹, recall 命中与之去重。
   // 不传则跳过闸二 (向后兼容第 2 步行为)。
   core_fingerprint?: CoreFingerprint;
@@ -313,19 +341,32 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)
   //    source 加权: model/mcp 来源的记忆得分 × RECALL_SOURCE_BOOST (默认 1.0)
+  //    role 加权: role_id 精确匹配 × RECALL_ROLE_BOOST_EXACT (默认 1.3)
+  //              role_name 兜底匹配 × RECALL_ROLE_BOOST_NAME (默认 1.1)
   const windowMs = injectDecayWindowMs(env);
   const factor = injectDecayFactor(env);
   const sourceBoost = readSourceBoost(env);
+  const roleBoostExact = readRoleBoostExact(env);
+  const roleBoostName = readRoleBoostName(env);
+  const requestRoleId = input.role_id ?? null;
+  const requestRoleName = input.role_name ?? null;
   const decayedIds: string[] = [];
   const scored: RecallHit[] = memories.map((m) => {
     const decay = decayForLastInjected(m.last_injected_at ?? null, windowMs, factor);
     if (decay < 1) decayedIds.push(m.id);
-    const boost = sourceBoost > 1 && (m.source === "model" || m.source === "mcp") ? sourceBoost : 1;
+    const sBoost = sourceBoost > 1 && (m.source === "model" || m.source === "mcp") ? sourceBoost : 1;
+    // Role boost
+    let rBoost = 1;
+    if (requestRoleId && m.role_id === requestRoleId) {
+      rBoost = roleBoostExact;
+    } else if (!requestRoleId && requestRoleName && m.role_name && normalizeName(requestRoleName) === normalizeName(m.role_name)) {
+      rBoost = roleBoostName;
+    }
     return {
       id: m.id,
       content: m.content,
       type: m.type,
-      score: (m.score ?? 0) * decay * boost,
+      score: (m.score ?? 0) * decay * sBoost * rBoost,
       source_layer: "memory" as const
     };
   });

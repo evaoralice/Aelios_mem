@@ -47,6 +47,10 @@ export interface Env {
   RECALL_ROLE_BOOST_EXACT?: string;
   // 召回角色加权: role_name 兜底匹配，默认 1.1
   RECALL_ROLE_BOOST_NAME?: string;
+  // 基线文本 per role_scope 上限，默认 2000
+  BASELINE_MAX_CHARS_PER_ROLE?: string;
+  // 基线文本总量上限，默认 8000
+  BASELINE_MAX_CHARS_TOTAL?: string;
   ENABLE_DAILY_MEMORY_DIGEST?: string;
   DREAM_NAMESPACE?: string;
   DREAM_MAX_MESSAGES?: string;

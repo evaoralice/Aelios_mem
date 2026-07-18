@@ -1169,3 +1169,104 @@ export async function listPendingChangelog(
     .all<MemoryChangelogRow>();
   return result.results ?? [];
 }
+
+// =====================================================================
+// 长期基线 (long_term_baselines) — 从原子记忆整理出的可注入稳定文本
+// =====================================================================
+
+export interface BaselineRow {
+  namespace: string;
+  role_scope: string;
+  content: string;
+  version: number;
+  generated_at: string;
+}
+
+export async function getBaselines(
+  db: D1Database,
+  input: { namespace: string; roleScope?: string }
+): Promise<BaselineRow[]> {
+  const roleScope = input.roleScope;
+  let sql = `SELECT namespace, role_scope, content, version, generated_at
+             FROM long_term_baselines WHERE namespace = ?`;
+  const binds: unknown[] = [input.namespace];
+  if (roleScope) {
+    sql += ` AND role_scope = ?`;
+    binds.push(roleScope);
+  }
+  sql += ` ORDER BY role_scope ASC`;
+  const result = await db.prepare(sql).bind(...binds).all<BaselineRow>();
+  return result.results ?? [];
+}
+
+export async function upsertBaseline(
+  db: D1Database,
+  input: { namespace: string; roleScope: string; content: string }
+): Promise<BaselineRow> {
+  const now = nowIso();
+  // version = COALESCE(max existing version, 0) + 1
+  const existing = await db
+    .prepare("SELECT version FROM long_term_baselines WHERE namespace = ? AND role_scope = ?")
+    .bind(input.namespace, input.roleScope)
+    .first<{ version: number }>();
+  const version = (existing?.version ?? 0) + 1;
+
+  await db
+    .prepare(
+      `INSERT INTO long_term_baselines (namespace, role_scope, content, version, generated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, role_scope) DO UPDATE SET content = excluded.content, version = excluded.version, generated_at = excluded.generated_at`
+    )
+    .bind(input.namespace, input.roleScope, input.content, version, now)
+    .run();
+
+  // Save snapshot
+  const snapId = newId("snap");
+  await db
+    .prepare(
+      `INSERT INTO long_term_baseline_snapshots (id, namespace, role_scope, version, content, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .bind(snapId, input.namespace, input.roleScope, version, input.content, now)
+    .run();
+
+  // Prune old snapshots (keep latest 7)
+  await db
+    .prepare(
+      `DELETE FROM long_term_baseline_snapshots
+       WHERE namespace = ? AND role_scope = ?
+       AND id NOT IN (
+         SELECT id FROM long_term_baseline_snapshots
+         WHERE namespace = ? AND role_scope = ?
+         ORDER BY created_at DESC LIMIT 7
+       )`
+    )
+    .bind(input.namespace, input.roleScope, input.namespace, input.roleScope)
+    .run();
+
+  return { namespace: input.namespace, role_scope: input.roleScope, content: input.content, version, generated_at: now };
+}
+
+// =====================================================================
+// 变更日志应用 — 凌晨做梦时由代码执行
+// =====================================================================
+
+export async function markChangelogApplied(
+  db: D1Database,
+  input: { id: string }
+): Promise<void> {
+  await db
+    .prepare("UPDATE memory_changelog SET status = 'applied', applied_at = ? WHERE id = ?")
+    .bind(nowIso(), input.id)
+    .run();
+}
+
+export async function markChangelogConflict(
+  db: D1Database,
+  input: { id: string; errorMessage: string }
+): Promise<void> {
+  await db
+    .prepare("UPDATE memory_changelog SET status = 'conflict', error_message = ? WHERE id = ?")
+    .bind(input.errorMessage, input.id)
+    .run();
+}

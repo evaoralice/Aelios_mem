@@ -20,10 +20,15 @@ import {
   upsertDigest,
   createLongtail,
   upsertDailyLog,
+  upsertBaseline,
   fetchMemoryLifecycleRows,
   upsertLongtailEmbedding,
+  listPendingChangelog,
+  markChangelogApplied,
+  markChangelogConflict,
   DIGEST_MAX_CHARS
 } from "../db/v2";
+import { computeRoleScope } from "../utils/role";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -57,6 +62,12 @@ interface DailyDigestResult {
   memories_to_add?: ExtractedMemory[];
   memories_to_update?: DigestMemoryUpdate[];
   memories_to_delete?: DigestMemoryDelete[];
+  baseline_texts?: Record<string, string>;
+  groups?: Array<{
+    role_scope: string;
+    memories_to_update?: DigestMemoryUpdate[];
+    memories_to_delete?: DigestMemoryDelete[];
+  }>;
 }
 
 interface DailyDigestStats {
@@ -382,6 +393,16 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
       })
     : undefined;
 
+  // baseline_texts: { "shared": "...", "id:alice-001": "..." }
+  const baseline_texts: Record<string, string> | undefined =
+    raw.baseline_texts && typeof raw.baseline_texts === "object" && !Array.isArray(raw.baseline_texts)
+      ? Object.fromEntries(
+          Object.entries(raw.baseline_texts as Record<string, unknown>)
+            .filter(([, v]) => typeof v === "string")
+            .map(([k, v]) => [k, v as string])
+        )
+      : undefined;
+
   return {
     date: readString(raw.date) ?? undefined,
     title: readString(raw.title) ?? undefined,
@@ -395,7 +416,8 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
         })
       : undefined,
     memories_to_update,
-    memories_to_delete
+    memories_to_delete,
+    baseline_texts,
   };
 }
 
@@ -433,7 +455,9 @@ function buildDigestPrompt(input: {
   existingMemories: MemoryApiRecord[];
   excerptLimit: number;
   hasMore: boolean;
+  roleGroups?: Array<{ role_scope: string; role_name: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
 }): string {
+  const hasRoleGroups = input.roleGroups && input.roleGroups.length > 0;
   return [
     "你是 Aelios 的 nightly dream 记忆整理器。你的任务不是简单总结，而是在用户休息时整理长期记忆。",
     "你会读取旧长期记忆和当天聊天 transcript，产出一份更干净、更一致、更有用的 memory store 整理计划。",
@@ -472,38 +496,64 @@ function buildDigestPrompt(input: {
     "- 控制总输出长度，宁可少写也不要输出超长 JSON。",
     "",
     "输出 JSON 结构：",
-    JSON.stringify({
-      date: input.dateLabel,
-      title: "夜间整理",
-      summary: "- 合并了 2 条重复的项目记忆\n- 更新了用户的作息偏好（从凌晨改为早起）\n- 删除了 1 条过时的调试记忆\n- 保留了 3 段关键原文",
-      sections: [{ heading: "整理结果", content: "……" }],
-      important_excerpts: [
-        {
-          quote: "用户或助手说过的关键原文",
-          reason: "为什么值得保留",
-          tags: ["project"],
-          source_message_ids: ["msg_x"]
-        }
-      ],
-      memories_to_add: [],
-      memories_to_update: [
-        {
-          target_id: "mem_x",
-          content: "更新后的旧记忆正文",
-          type: "project",
-          importance: 0.88,
-          confidence: 0.9,
-          tags: ["project"]
-        }
-      ],
-      memories_to_delete: [{ target_id: "mem_y", reason: "空内容或重复" }]
-    }),
+    hasRoleGroups
+      ? JSON.stringify({
+          groups: input.roleGroups!.map((g) => ({
+            role_scope: g.role_scope,
+            memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8 }],
+            memories_to_delete: [{ target_id: "mem_y", reason: "重复" }],
+          })),
+          summary: "- 分条列点日志…",
+          baseline_texts: {
+            shared: "整理后的共享基线文本",
+            "id:alice-001": "Alice 专属基线文本",
+          },
+          important_excerpts: [{ quote: "原文", reason: "理由", tags: ["project"] }],
+        })
+      : JSON.stringify({
+          date: input.dateLabel,
+          title: "夜间整理",
+          summary: "- 合并了 2 条重复的项目记忆\n- 更新了用户的作息偏好（从凌晨改为早起）\n- 删除了 1 条过时的调试记忆\n- 保留了 3 段关键原文",
+          sections: [{ heading: "整理结果", content: "……" }],
+          important_excerpts: [
+            {
+              quote: "用户或助手说过的关键原文",
+              reason: "为什么值得保留",
+              tags: ["project"],
+              source_message_ids: ["msg_x"]
+            }
+          ],
+          memories_to_add: [],
+          memories_to_update: [
+            {
+              target_id: "mem_x",
+              content: "更新后的旧记忆正文",
+              type: "project",
+              importance: 0.88,
+              confidence: 0.9,
+              tags: ["project"]
+            }
+          ],
+          memories_to_delete: [{ target_id: "mem_y", reason: "空内容或重复" }]
+        }),
     "",
-    "旧长期记忆候选：",
-    formatExistingMemories(input.existingMemories),
-    "",
-    "今日原始聊天：",
-    formatTranscript(input.messages)
+    hasRoleGroups
+      ? input.roleGroups!.map((g) =>
+          [
+            `=== [${g.role_scope === "shared" ? "共享" : g.role_name ?? g.role_scope}] ===`,
+            "旧记忆：",
+            formatExistingMemories(g.memories),
+            "今日聊天：",
+            formatTranscript(g.messages),
+          ].join("\n")
+        ).join("\n\n")
+      : [
+          "旧长期记忆候选：",
+          formatExistingMemories(input.existingMemories),
+          "",
+          "今日原始聊天：",
+          formatTranscript(input.messages),
+        ].join("\n")
   ].join("\n");
 }
 
@@ -717,6 +767,88 @@ async function recordDreamReviewProposal(
     .run();
 }
 
+// Phase G: Apply pending changelog entries (code execution, no model needed)
+async function applyPendingChanges(
+  env: Env,
+  namespace: string
+): Promise<{ applied: number; conflicts: number }> {
+  let applied = 0;
+  let conflicts = 0;
+
+  // Get all pending entries for this namespace (all role_scopes)
+  const allPending = await listPendingChangelog(env.DB, { namespace, limit: 100 });
+  // Also get shared-scope entries
+  const sharedPending = await listPendingChangelog(env.DB, { namespace, roleScope: "shared", limit: 100 });
+  const combined = [...allPending, ...sharedPending];
+  // Deduplicate by id
+  const seen = new Set<string>();
+  const pending = combined.filter((c) => {
+    if (seen.has(c.id)) return false;
+    seen.add(c.id);
+    return true;
+  });
+
+  for (const entry of pending) {
+    try {
+      if (entry.op === "add") {
+        const payload = JSON.parse(entry.payload_json);
+        // changelog add payload has content/type/importance but no fact_key
+        // use chg_<id> as fact_key for uniqueness (dedup within same changelog entry)
+        await upsertMemoryByFactKey(env, {
+          namespace,
+          factKey: payload.fact_key || `chg_${entry.id}`,
+          content: entry.after_content || payload.content || "",
+          type: payload.type || "fact",
+          importance: payload.importance ?? 0.6,
+          source: "model",
+          roleId: entry.role_id,
+          roleName: entry.role_name,
+        });
+        await markChangelogApplied(env.DB, { id: entry.id });
+        applied++;
+      } else if (entry.op === "update") {
+        const payload = JSON.parse(entry.payload_json);
+        // Check target exists and is active
+        const existing = await getVectorMemory(env, entry.target_id!);
+        if (!existing || existing.status !== "active") {
+          await markChangelogConflict(env.DB, { id: entry.id, errorMessage: "target not found or not active" });
+          conflicts++;
+          continue;
+        }
+        await supersedeMemory(env, {
+          namespace,
+          oldId: entry.target_id!,
+          newContent: payload.content || entry.after_content || "",
+          newType: payload.type || existing.type,
+          source: "model",
+          roleId: entry.role_id,
+          roleName: entry.role_name,
+        });
+        await markChangelogApplied(env.DB, { id: entry.id });
+        applied++;
+      } else if (entry.op === "delete") {
+        const existing = await getVectorMemory(env, entry.target_id!);
+        if (!existing || existing.status !== "active") {
+          await markChangelogConflict(env.DB, { id: entry.id, errorMessage: "target not found or not active" });
+          conflicts++;
+          continue;
+        }
+        await archiveMemory(env, { namespace, id: entry.target_id! });
+        await markChangelogApplied(env.DB, { id: entry.id });
+        applied++;
+      }
+    } catch (error) {
+      await markChangelogConflict(env.DB, {
+        id: entry.id,
+        errorMessage: error instanceof Error ? error.message : "unknown error",
+      });
+      conflicts++;
+    }
+  }
+
+  return { applied, conflicts };
+}
+
 async function applyDreamV2(
   env: Env,
   input: {
@@ -807,6 +939,31 @@ async function applyDreamV2(
     title: digest.title ?? dateLabel,
     summary: digest.summary ?? ""
   });
+
+  // Phase F/G: Generate and save baseline texts from dream output
+  const baselineTexts = digest.baseline_texts;
+  if (baselineTexts) {
+    const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
+    const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
+    let totalChars = 0;
+    // Sort: shared first, then by role_scope
+    const sortedEntries = Object.entries(baselineTexts).sort(([a], [b]) => {
+      if (a === "shared") return -1;
+      if (b === "shared") return 1;
+      return a.localeCompare(b);
+    });
+    for (const [roleScope, content] of sortedEntries) {
+      if (typeof content !== "string" || !content.trim()) continue;
+      const truncated = content.slice(0, maxPerRole);
+      if (totalChars + truncated.length > maxTotal) {
+        // Skip if would exceed total cap (shared already prioritized first)
+        console.warn(`dream: baseline for ${roleScope} skipped (total cap ${maxTotal} exceeded)`);
+        continue;
+      }
+      totalChars += truncated.length;
+      await upsertBaseline(env.DB, { namespace, roleScope, content: truncated });
+    }
+  }
 
   return { added, updated, deleted, excerpts, longtail: longtailCount };
 }
@@ -908,13 +1065,29 @@ export async function runDailyMemoryDigest(
 
   // v2 path: fact_key upsert + L1 digest + longtail + recent_logs
   if (v2Enabled && strategy !== "legacy") {
+    // Phase G: Apply pending changelog entries first (code execution, no model)
+    const pendingResult = await applyPendingChanges(env, namespace);
+    if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
+      console.log("dream: applied pending changes", pendingResult);
+    }
+
+    // Phase G: Group messages by role_id for multi-role dream
+    // TODO: When multi-role prompt is fully wired, pass roleGroups to buildDigestPrompt
+    // For now, grouping is computed but the model still uses the flat prompt format
+    const messagesByRole = new Map<string | null, MessageRecord[]>();
+    for (const msg of messages) {
+      const key = msg.role_id ?? null;
+      if (!messagesByRole.has(key)) messagesByRole.set(key, []);
+      messagesByRole.get(key)!.push(msg);
+    }
+
     const v2Result = await applyDreamV2(env, {
       namespace,
       strategy,
       dateLabel,
       messages,
       digest,
-      messageIds
+      messageIds,
     });
 
     await writeCursor(env.DB, cursorName, hasMore ? lastMessage.created_at : `done:${lastMessage.created_at}`);

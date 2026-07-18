@@ -7,6 +7,8 @@ import { extractLastUserText } from "../memory/inject";
 import { assemble } from "../assembler/assemble";
 import { enqueueMemoryMaintenanceIfNeeded, enqueueRetentionIfNeeded } from "../queue/producer";
 import { buildBootPackage, isV2Enabled, runRecall } from "../memory/v2/recall";
+import { listPendingChangelog } from "../db/v2";
+import { computeRoleScope } from "../utils/role";
 import {
   buildAnthropicRequestFromAssembled,
   callAnthropicNative,
@@ -112,7 +114,7 @@ export async function handleChatCompletions(
   const lastUserText = extractLastUserText(body.messages);
 
   const boot = isV2Enabled(env) ? await buildBootPackage(env, { namespace }) : null;
-  const recallResult = boot ? await runRecall(env, { namespace, query: lastUserText }) : null;
+  const recallResult = boot ? await runRecall(env, { namespace, query: lastUserText, role_id: requestRoleId, role_name: requestRoleName }) : null;
   const recallHitsAsMemories = recallResult
     ? recallResult.hits.map((h) => ({
         id: h.id,
@@ -145,6 +147,18 @@ export async function handleChatCompletions(
       }))
     : [];
 
+  // Phase F: read pending changelog entries for injection
+  const requestRoleScope = computeRoleScope(requestRoleId, requestRoleName);
+  const pendingRaw = isV2Enabled(env)
+    ? await listPendingChangelog(env.DB, { namespace, roleScope: requestRoleScope, limit: 10 })
+    : [];
+  const pendingChanges = pendingRaw.map((c) => ({
+    op: c.op,
+    after_content: c.after_content,
+    target_id: c.target_id,
+    reason: c.reason,
+  }));
+
   let upstream: Response;
   let clientSystemHash: string | null = null;
   let cacheAnchorBlock: string | null = null;
@@ -160,6 +174,7 @@ export async function handleChatCompletions(
         ragMemories: recallHitsAsMemories,
         visionOutput: null,
       });
+      assembled.pending_changes = pendingChanges;
       clientSystemHash = assembled.meta.client_system_hash;
       cacheAnchorBlock = assembled.meta.anchor_index >= 0 ? "client_system" : null;
       upstream = await callAnthropicNative(env, buildAnthropicRequestFromAssembled(body, targetModel, assembled, env), targetModel);
