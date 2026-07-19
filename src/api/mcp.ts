@@ -199,13 +199,15 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "memory_boot",
       description:
-        "Cold-start package: L1 digest + recent daily logs + top pinned precious + all glossary. " +
+        "Cold-start package: current role baseline + recent daily logs (current role only) + top pinned precious + all glossary. " +
         "Output is stable and deterministically ordered so the client can cache it. " +
-        "Call once on SessionStart.",
+        "Call once on SessionStart with role_id/role_name to scope baseline and daily_log to the current role.",
       inputSchema: {
         type: "object",
         properties: {
-          namespace: { type: "string" }
+          namespace: { type: "string" },
+          role_id: { type: "string" },
+          role_name: { type: "string" }
         }
       }
     },
@@ -615,7 +617,9 @@ export async function callTool(
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
     if (!isV2Enabled(env)) return toolError("memory_boot requires MEMORY_LIFECYCLE_ENABLED=true");
     const pkg = await buildBootPackage(env, {
-      namespace: resolveNamespace(profile, args.namespace)
+      namespace: resolveNamespace(profile, args.namespace),
+      roleId: readString(args.role_id) ?? null,
+      roleName: readString(args.role_name) ?? null,
     });
     return textToolResult({ data: pkg });
   }

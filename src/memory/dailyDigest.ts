@@ -26,6 +26,7 @@ import {
   listPendingChangelog,
   markChangelogApplied,
   markChangelogConflict,
+  getBaselines,
   DIGEST_MAX_CHARS
 } from "../db/v2";
 import { computeRoleScope, isRoleMemoryEnabled } from "../utils/role";
@@ -53,6 +54,19 @@ interface ImportantExcerpt {
   source_message_ids?: string[];
 }
 
+interface DigestDailyLog {
+  title?: string;
+  summary?: string;
+}
+
+interface DigestRoleGroup {
+  role_scope: string;
+  daily_log?: DigestDailyLog;
+  baseline?: string;
+  memories_to_update?: DigestMemoryUpdate[];
+  memories_to_delete?: DigestMemoryDelete[];
+}
+
 interface DailyDigestResult {
   date?: string;
   title?: string;
@@ -63,11 +77,7 @@ interface DailyDigestResult {
   memories_to_update?: DigestMemoryUpdate[];
   memories_to_delete?: DigestMemoryDelete[];
   baseline_texts?: Record<string, string>;
-  groups?: Array<{
-    role_scope: string;
-    memories_to_update?: DigestMemoryUpdate[];
-    memories_to_delete?: DigestMemoryDelete[];
-  }>;
+  groups?: DigestRoleGroup[];
 }
 
 interface DailyDigestStats {
@@ -405,11 +415,20 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
 
   // groups: multi-role dream output
   const groups: DailyDigestResult["groups"] = Array.isArray(raw.groups)
-    ? raw.groups.flatMap((item): NonNullable<DailyDigestResult["groups"]>[number][] => {
+    ? raw.groups.flatMap((item): DigestRoleGroup[] => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return [];
         const record = item as Record<string, unknown>;
         const roleScope = readString(record.role_scope);
         if (!roleScope) return [];
+        // Parse per-role daily_log
+        let dailyLog: DigestDailyLog | undefined;
+        if (record.daily_log && typeof record.daily_log === "object" && !Array.isArray(record.daily_log)) {
+          const dl = record.daily_log as Record<string, unknown>;
+          const title = readString(dl.title) ?? undefined;
+          const summary = readString(dl.summary) ?? undefined;
+          if (title || summary) dailyLog = { title, summary };
+        }
+        const baseline = readString(record.baseline) ?? undefined;
         const subUpdates = Array.isArray(record.memories_to_update)
           ? record.memories_to_update.flatMap((sub): DigestMemoryUpdate[] => {
               if (!sub || typeof sub !== "object" || Array.isArray(sub)) return [];
@@ -434,7 +453,13 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
               return targetId ? [{ target_id: targetId, reason: readString(subRecord.reason) ?? undefined }] : [];
             })
           : undefined;
-        return [{ role_scope: roleScope, memories_to_update: subUpdates, memories_to_delete: subDeletes }];
+        return [{
+          role_scope: roleScope,
+          daily_log: dailyLog,
+          baseline,
+          memories_to_update: subUpdates,
+          memories_to_delete: subDeletes,
+        }];
       })
     : undefined;
 
@@ -499,7 +524,7 @@ function buildDigestPrompt(input: {
   existingMemories: MemoryApiRecord[];
   excerptLimit: number;
   hasMore: boolean;
-  roleGroups?: Array<{ role_scope: string; role_name: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
+  roleGroups?: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
 }): string {
   const hasRoleGroups = input.roleGroups && input.roleGroups.length > 0;
   return [
@@ -529,63 +554,75 @@ function buildDigestPrompt(input: {
     "- 站在“我=助手”的视角写。关于用户，用“你……”；关于助手承诺，用“我需要……”。",
     "- 不要提到 D1、Vectorize、RAG、数据库、记忆系统、代理层等实现细节。",
     "",
-    "Dream 输出格式：",
-    "- title 是 12 字以内标题。",
-    "- summary 写成分条列点格式（每条一行，用「- 」开头），概括今天发生了什么、整理了什么。整个 summary 控制在 800 字以内，每条简洁，不要写成一大段。",
-    "- sections 最多 3 段，每段有 heading 和 content；没有必要可以给空数组。",
-    `- important_excerpts 最多 ${input.excerptLimit} 条，quote 必须是值得保留的原文片段。`,
-    "- memories_to_add 保留兼容字段，v2 下默认输出空数组。",
-    "- memories_to_update 只针对给出的旧记忆 id。",
-    "- memories_to_delete 只删除空、重复、明显过期或被新信息否定的旧记忆。",
-    "- 控制总输出长度，宁可少写也不要输出超长 JSON。",
-    "",
-    "输出 JSON 结构：",
-    hasRoleGroups
-      ? JSON.stringify({
-          groups: input.roleGroups!.map((g) => ({
-            role_scope: g.role_scope,
-            memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8 }],
-            memories_to_delete: [{ target_id: "mem_y", reason: "重复" }],
-          })),
-          summary: "- 分条列点日志…",
-          baseline_texts: {
-            shared: "整理后的共享基线文本",
-            "id:alice-001": "Alice 专属基线文本",
-          },
-          important_excerpts: [{ quote: "原文", reason: "理由", tags: ["project"] }],
-        })
-      : JSON.stringify({
-          date: input.dateLabel,
-          title: "夜间整理",
-          summary: "- 合并了 2 条重复的项目记忆\n- 更新了用户的作息偏好（从凌晨改为早起）\n- 删除了 1 条过时的调试记忆\n- 保留了 3 段关键原文",
-          sections: [{ heading: "整理结果", content: "……" }],
-          important_excerpts: [
-            {
-              quote: "用户或助手说过的关键原文",
-              reason: "为什么值得保留",
-              tags: ["project"],
-              source_message_ids: ["msg_x"]
-            }
-          ],
-          memories_to_add: [],
-          memories_to_update: [
-            {
-              target_id: "mem_x",
-              content: "更新后的旧记忆正文",
-              type: "project",
-              importance: 0.88,
-              confidence: 0.9,
-              tags: ["project"]
-            }
-          ],
-          memories_to_delete: [{ target_id: "mem_y", reason: "空内容或重复" }]
-        }),
+    ...(hasRoleGroups ? [
+      "角色分组规则：",
+      "- 每个角色组只处理该角色窗口内的 user + assistant 消息，不要混入其他角色视角。",
+      "- shared memories（role_scope=shared）作为只读参考，不可以在角色组中修改或删除 shared target；shared 整理只在 shared 段单独处理（如存在）。",
+      "- 角色组只能修改/删除 role_scope 等于该组 role_scope 的记忆，跨 scope 操作会被丢弃。",
+      "- 同一 target_id 在一次 dream 中只能出现一次操作；如重复出现以第一条为准。",
+      "",
+      "每个角色组必须输出：",
+      "- daily_log：该角色视角的当日标题和分条列点 summary（每条一行「- 」开头，整体 ≤800 字），写当天互动要点，不写流水账。",
+      "- baseline：该角色对用户的长期印象（不是当天流水账）。要求：写角色如何理解用户、关系状态、相处经验与长期应对方式；忠实继承旧 baseline 中未被新证据推翻的部分；不把一次性安排写成永久印象；不混入其他角色视角；若旧 baseline 为空就基于当天素材生成首版。",
+      "- memories_to_update / memories_to_delete：仅限同 role_scope 的 target_id。",
+      "",
+      "输出 JSON 结构（多角色分组）：",
+      JSON.stringify({
+        groups: input.roleGroups!.map((g) => ({
+          role_scope: g.role_scope,
+          daily_log: { title: "当天标题", summary: "- 互动要点1\n- 互动要点2" },
+          baseline: "该角色对用户的长期印象（继承旧 baseline，融合当天新证据）",
+          memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8 }],
+          memories_to_delete: [{ target_id: "mem_y", reason: "重复" }],
+        })),
+        important_excerpts: [{ quote: "原文", reason: "理由", tags: ["project"] }],
+      }),
+    ] : [
+      "Dream 输出格式：",
+      "- title 是 12 字以内标题。",
+      "- summary 写成分条列点格式（每条一行，用「- 」开头），概括今天发生了什么、整理了什么。整个 summary 控制在 800 字以内，每条简洁，不要写成一大段。",
+      "- sections 最多 3 段，每段有 heading 和 content；没有必要可以给空数组。",
+      `- important_excerpts 最多 ${input.excerptLimit} 条，quote 必须是值得保留的原文片段。`,
+      "- memories_to_add 保留兼容字段，v2 下默认输出空数组。",
+      "- memories_to_update 只针对给出的旧记忆 id。",
+      "- memories_to_delete 只删除空、重复、明显过期或被新信息否定的旧记忆。",
+      "- 控制总输出长度，宁可少写也不要输出超长 JSON。",
+      "",
+      "输出 JSON 结构：",
+      JSON.stringify({
+        date: input.dateLabel,
+        title: "夜间整理",
+        summary: "- 合并了 2 条重复的项目记忆\n- 更新了用户的作息偏好（从凌晨改为早起）\n- 删除了 1 条过时的调试记忆\n- 保留了 3 段关键原文",
+        sections: [{ heading: "整理结果", content: "……" }],
+        important_excerpts: [
+          {
+            quote: "用户或助手说过的关键原文",
+            reason: "为什么值得保留",
+            tags: ["project"],
+            source_message_ids: ["msg_x"]
+          }
+        ],
+        memories_to_add: [],
+        memories_to_update: [
+          {
+            target_id: "mem_x",
+            content: "更新后的旧记忆正文",
+            type: "project",
+            importance: 0.88,
+            confidence: 0.9,
+            tags: ["project"]
+          }
+        ],
+        memories_to_delete: [{ target_id: "mem_y", reason: "空内容或重复" }]
+      }),
+    ]),
     "",
     hasRoleGroups
       ? input.roleGroups!.map((g) =>
           [
             `=== [${g.role_scope === "shared" ? "共享" : g.role_name ?? g.role_scope}] ===`,
-            "旧记忆：",
+            g.oldBaseline ? `旧 baseline（请忠实继承，仅在有新证据时更新）：\n${g.oldBaseline}` : "（无旧 baseline，基于当天素材生成首版）",
+            "可修改的旧记忆（role_scope 与本组一致）：",
             formatExistingMemories(g.memories),
             "今日聊天：",
             formatTranscript(g.messages),
@@ -893,6 +930,7 @@ async function applyDreamV2(
     messages: MessageRecord[];
     digest: DailyDigestResult;
     messageIds: string[];
+    roleGroups?: Array<{ role_scope: string; role_name: string | null }>;
   }
 ): Promise<{ added: number; updated: number; deleted: number; excerpts: number; longtail: number }> {
   const { namespace, strategy, dateLabel, digest, messageIds } = input;
@@ -905,8 +943,72 @@ async function applyDreamV2(
     return { added: 0, updated: 0, deleted: 0, excerpts: 0, longtail: 0 };
   }
 
+  // Build set of allowed role_scopes for cross-scope validation.
+  // Role groups can only modify targets whose role_scope matches their own.
+  const groupScopes = new Set((input.roleGroups ?? []).map((g) => g.role_scope));
+
+  // Collect memory operations with scope validation
+  const flatUpdates: DigestMemoryUpdate[] = [];
+  const flatDeletes: DigestMemoryDelete[] = [];
+
+  if (digest.groups && digest.groups.length > 0) {
+    // Track seen target_ids within this dream to detect conflicts
+    const seenTargets = new Set<string>();
+    for (const group of digest.groups) {
+      const groupScope = group.role_scope;
+      const canModify = groupScopes.has(groupScope);
+      for (const op of [...(group.memories_to_update ?? []), ...(group.memories_to_delete ?? [])]) {
+        if (seenTargets.has(op.target_id)) {
+          console.warn(`dream: target ${op.target_id} appears multiple times in dream output; skipping duplicate op`);
+          continue;
+        }
+        seenTargets.add(op.target_id);
+      }
+      for (const upd of group.memories_to_update ?? []) {
+        if (!canModify) {
+          console.warn(`dream: group ${groupScope} cannot modify targets (not in allowed scopes); skipping update ${upd.target_id}`);
+          continue;
+        }
+        // Verify target role_scope matches group scope (unless shared group editing shared target)
+        const existing = await getVectorMemory(env, upd.target_id);
+        if (!existing || existing.status !== "active") continue;
+        const targetScope = computeRoleScope(existing.role_id, existing.role_name);
+        if (groupScope !== "shared" && targetScope !== groupScope) {
+          console.warn(`dream: group ${groupScope} tried to update ${upd.target_id} (scope ${targetScope}); cross-scope blocked`);
+          continue;
+        }
+        if (groupScope === "shared" && targetScope !== "shared") {
+          console.warn(`dream: shared group tried to update non-shared target ${upd.target_id}; blocked`);
+          continue;
+        }
+        flatUpdates.push(upd);
+      }
+      for (const del of group.memories_to_delete ?? []) {
+        if (!canModify) {
+          console.warn(`dream: group ${groupScope} cannot modify targets; skipping delete ${del.target_id}`);
+          continue;
+        }
+        const existing = await getVectorMemory(env, del.target_id);
+        if (!existing || existing.status !== "active" || existing.pinned) continue;
+        const targetScope = computeRoleScope(existing.role_id, existing.role_name);
+        if (groupScope !== "shared" && targetScope !== groupScope) {
+          console.warn(`dream: group ${groupScope} tried to delete ${del.target_id} (scope ${targetScope}); cross-scope blocked`);
+          continue;
+        }
+        if (groupScope === "shared" && targetScope !== "shared") {
+          console.warn(`dream: shared group tried to delete non-shared target ${del.target_id}; blocked`);
+          continue;
+        }
+        flatDeletes.push(del);
+      }
+    }
+  } else {
+    flatUpdates.push(...(digest.memories_to_update ?? []));
+    flatDeletes.push(...(digest.memories_to_delete ?? []));
+  }
+
   // v2 首次抽取由每 4 小时 extractor 负责；dream 只整理、更新、删除和写 L1/daily_log。
-  for (const item of digest.memories_to_update ?? []) {
+  for (const item of flatUpdates) {
     const existing = await getVectorMemory(env, item.target_id);
     if (!existing || existing.namespace !== namespace || existing.status !== "active") continue;
 
@@ -941,7 +1043,7 @@ async function applyDreamV2(
     }
   }
 
-  for (const item of digest.memories_to_delete ?? []) {
+  for (const item of flatDeletes) {
     const existing = await getVectorMemory(env, item.target_id);
     if (!existing || existing.status !== "active" || existing.pinned) continue;
 
@@ -960,7 +1062,8 @@ async function applyDreamV2(
     fallbackMessageIds: messageIds
   });
 
-  if (digest.summary) {
+  // L1 digest: only write when no role groups (shared/global digest); per-role digests go to daily_log below.
+  if (!digest.groups && digest.summary) {
     const digestContent = [
       digest.title ? `【${digest.title}】` : "",
       digest.summary,
@@ -971,22 +1074,52 @@ async function applyDreamV2(
     await upsertDigest(env.DB, { namespace, content: truncate(digestContent, DIGEST_MAX_CHARS) });
   }
 
-  await upsertDailyLog(env.DB, {
-    namespace,
-    date: dateLabel,
-    title: digest.title ?? dateLabel,
-    summary: digest.summary ?? "",
-    // Write to shared scope by default; multi-role dream will write per-role separately
-    roleScope: "shared",
-  });
+  // P1-3: Per-role daily_log + baseline write (only when role memory enabled)
+  const roleEnabled = isRoleMemoryEnabled(env);
+  if (roleEnabled && digest.groups && digest.groups.length > 0) {
+    const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
+    const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
+    let totalBaselineChars = 0;
+    for (const group of digest.groups) {
+      const scope = group.role_scope;
+      // P1-3: write per-role daily_log
+      if (group.daily_log && (group.daily_log.title || group.daily_log.summary)) {
+        await upsertDailyLog(env.DB, {
+          namespace,
+          date: dateLabel,
+          title: group.daily_log.title ?? dateLabel,
+          summary: group.daily_log.summary ?? "",
+          roleScope: scope,
+        });
+      }
+      // P1-1: write per-role baseline
+      if (group.baseline && typeof group.baseline === "string" && group.baseline.trim()) {
+        const truncated = group.baseline.slice(0, maxPerRole);
+        if (totalBaselineChars + truncated.length > maxTotal) {
+          console.warn(`dream: baseline for ${scope} skipped (total cap ${maxTotal} exceeded)`);
+          continue;
+        }
+        totalBaselineChars += truncated.length;
+        await upsertBaseline(env.DB, { namespace, roleScope: scope, content: truncated });
+      }
+    }
+  } else if (!digest.groups && digest.summary) {
+    // Non-role path: write shared daily_log (legacy behavior)
+    await upsertDailyLog(env.DB, {
+      namespace,
+      date: dateLabel,
+      title: digest.title ?? dateLabel,
+      summary: digest.summary,
+      roleScope: "shared",
+    });
+  }
 
-  // Phase F/G: Generate and save baseline texts from dream output (only when role memory enabled)
-  const baselineTexts = isRoleMemoryEnabled(env) ? digest.baseline_texts : undefined;
-  if (baselineTexts) {
+  // Legacy baseline_texts support (non-groups path)
+  const baselineTexts = roleEnabled ? digest.baseline_texts : undefined;
+  if (baselineTexts && !digest.groups) {
     const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
     const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
     let totalChars = 0;
-    // Sort: shared first, then by role_scope
     const sortedEntries = Object.entries(baselineTexts).sort(([a], [b]) => {
       if (a === "shared") return -1;
       if (b === "shared") return 1;
@@ -996,7 +1129,6 @@ async function applyDreamV2(
       if (typeof content !== "string" || !content.trim()) continue;
       const truncated = content.slice(0, maxPerRole);
       if (totalChars + truncated.length > maxTotal) {
-        // Skip if would exceed total cap (shared already prioritized first)
         console.warn(`dream: baseline for ${roleScope} skipped (total cap ${maxTotal} exceeded)`);
         continue;
       }
@@ -1044,6 +1176,17 @@ export async function runDailyMemoryDigest(
   const memoryContextLimit = readDreamMemoryContextLimit(env);
   const strategy = readDreamStrategy(env);
   const v2Enabled = isV2Enabled(env);
+  const roleEnabled = isRoleMemoryEnabled(env);
+
+  // P0-3: Apply pending changelog BEFORE reading memories / building prompt,
+  // so the dream model sees the freshly-applied state.
+  if (v2Enabled && strategy !== "legacy" && roleEnabled) {
+    const pendingResult = await applyPendingChanges(env, namespace);
+    if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
+      console.log("dream: applied pending changes before reading memories", pendingResult);
+    }
+  }
+
   let existingMemories: MemoryApiRecord[] = [];
   try {
     if (v2Enabled && strategy !== "legacy") {
@@ -1065,34 +1208,58 @@ export async function runDailyMemoryDigest(
   }
   const cleanedEmptyMemories = v2Enabled && strategy === "review" ? 0 : await cleanEmptyMemories(env, namespace);
 
-  // Phase G: Group messages by role_id for multi-role prompt
-  let roleGroups: Array<{ role_scope: string; role_name: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
-  if (isRoleMemoryEnabled(env)) {
-    const messagesByRole = new Map<string | null, MessageRecord[]>();
+  // P0-4: Group messages by computeRoleScope (not by raw role_id), and trigger grouping
+  // whenever at least one non-shared role exists (no longer requires size > 1).
+  let roleGroups: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
+  if (roleEnabled) {
+    // Group messages by computeRoleScope
+    const messagesByScope = new Map<string, MessageRecord[]>();
     for (const msg of messages) {
-      const key = msg.role_id ?? null;
-      if (!messagesByRole.has(key)) messagesByRole.set(key, []);
-      messagesByRole.get(key)!.push(msg);
+      const scope = computeRoleScope(msg.role_id, msg.role_name);
+      if (!messagesByScope.has(scope)) messagesByScope.set(scope, []);
+      messagesByScope.get(scope)!.push(msg);
     }
-    const sharedMessages = messagesByRole.get(null) ?? [];
-    if (messagesByRole.size > 1) {
+    // Collect distinct non-shared scopes present in messages
+    const nonSharedScopes = [...messagesByScope.keys()].filter((s) => s !== "shared");
+    if (nonSharedScopes.length > 0) {
       const maxRoles = Number(env.DREAM_MAX_ROLES_PER_RUN ?? "5");
-      const roleEntries = [...messagesByRole.entries()]
-        .filter(([k]) => k !== null)
-        .slice(0, maxRoles);
+      if (nonSharedScopes.length > maxRoles) {
+        // P0-4: Don't silently drop — abort this batch without advancing cursor.
+        console.error(`dream: non-shared role count ${nonSharedScopes.length} exceeds DREAM_MAX_ROLES_PER_RUN=${maxRoles}; aborting without advancing cursor`);
+        return {
+          ran: false,
+          mode: "dream",
+          date: dateLabel,
+          reason: "model_error",
+          startIso,
+          endIso,
+          cursor,
+          processedMessages: messages.length,
+        };
+      }
       roleGroups = [];
-      for (const [roleId, roleMsgs] of roleEntries) {
+      for (const scope of nonSharedScopes.slice(0, maxRoles)) {
+        const roleMsgs = messagesByScope.get(scope) ?? [];
         const roleName = roleMsgs[0]?.role_name ?? null;
-        const roleScope = computeRoleScope(roleId, roleName);
-        const roleMemories = await listMemoriesPage(env.DB, { namespace, status: "active", limit: memoryContextLimit, offset: 0 });
-        const roleMemRecords = roleMemories.records
-          .map((r) => toMemoryApiRecord(r))
-          .filter((m) => m.role_scope === roleScope || m.role_scope === "shared");
+        // Each role group only contains that role's messages (no shared mixing).
+        // Shared memories are read-only reference, filtered into memories below.
+        const roleMemories = existingMemories.filter(
+          (m) => m.role_scope === scope || m.role_scope === "shared"
+        );
+        // Fetch old baseline for this scope to feed the prompt (P1-1)
+        let oldBaseline: string | null = null;
+        try {
+          const baselineRows = await getBaselines(env.DB, { namespace, roleScope: scope });
+          oldBaseline = baselineRows[0]?.content ?? null;
+        } catch (error) {
+          console.warn(`dream: failed to read baseline for ${scope}`, error);
+        }
         roleGroups.push({
-          role_scope: roleScope,
+          role_scope: scope,
           role_name: roleName,
-          messages: [...sharedMessages, ...roleMsgs],
-          memories: roleMemRecords,
+          oldBaseline,
+          messages: roleMsgs,
+          memories: roleMemories,
         });
       }
     }
@@ -1139,14 +1306,6 @@ export async function runDailyMemoryDigest(
 
   // v2 path: fact_key upsert + L1 digest + longtail + recent_logs
   if (v2Enabled && strategy !== "legacy") {
-    // Phase G: Apply pending changelog entries first (only when role memory enabled)
-    if (isRoleMemoryEnabled(env)) {
-      const pendingResult = await applyPendingChanges(env, namespace);
-      if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
-        console.log("dream: applied pending changes", pendingResult);
-      }
-    }
-
     const v2Result = await applyDreamV2(env, {
       namespace,
       strategy,
@@ -1154,6 +1313,7 @@ export async function runDailyMemoryDigest(
       messages,
       digest,
       messageIds,
+      roleGroups: roleGroups?.map((g) => ({ role_scope: g.role_scope, role_name: g.role_name })),
     });
 
     await writeCursor(env.DB, cursorName, hasMore ? lastMessage.created_at : `done:${lastMessage.created_at}`);

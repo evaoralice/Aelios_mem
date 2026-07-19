@@ -56,15 +56,14 @@ describe("recall role boost (Phase E)", () => {
       ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
-      makeMemory({ id: "a", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
-      makeMemory({ id: "b", role_id: null, role_scope: "shared", score: 0.5 }),
+      makeMemory({ id: "a", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5, content: "alice fact about cats" }),
+      makeMemory({ id: "b", role_id: null, role_scope: "shared", score: 0.5, content: "shared fact about dogs" }),
     ]);
     mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001" } as any);
     const hitA = result.hits.find((h) => h.id === "a");
     const hitB = result.hits.find((h) => h.id === "b");
-    // pre-boost: sqrt(1.3), post-boost: sqrt(1.3), total = 1.3
     // 0.5 * 1.3 = 0.65
     expect(hitA!.score).toBeCloseTo(0.65, 5);
     expect(hitB!.score).toBeCloseTo(0.5, 5);

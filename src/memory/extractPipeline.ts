@@ -51,7 +51,7 @@ export type MemoryExtractionRunResult =
   | {
       ran: false;
       mode: "extract";
-      reason: "extract_disabled" | "already_done" | "no_messages" | "missing_model" | "model_error" | "model_invalid_json";
+      reason: "extract_disabled" | "auto_memory_disabled" | "already_done" | "no_messages" | "missing_model" | "model_error" | "model_invalid_json";
       windowEndIso?: string;
       cursor?: string | null;
       processedMessages?: number;
@@ -425,6 +425,7 @@ export async function runMemoryExtractionWindow(
   options: { scheduledTime?: number; force?: boolean } = {}
 ): Promise<MemoryExtractionRunResult> {
   if (!isV2Enabled(env)) return { ran: false, mode: "extract", reason: "extract_disabled" };
+  if (env.ENABLE_AUTO_MEMORY === "false") return { ran: false, mode: "extract", reason: "auto_memory_disabled" };
 
   const endIso = windowEndIso(options.scheduledTime);
   const cursorName = `extract:${namespace}`;
@@ -504,6 +505,9 @@ export async function runMemoryExtractionBatches(
   namespace: string,
   options: { scheduledTime?: number; force?: boolean } = {}
 ): Promise<MemoryExtractionRunResult[]> {
+  if (env.ENABLE_AUTO_MEMORY === "false") {
+    return [{ ran: false, mode: "extract", reason: "auto_memory_disabled" }];
+  }
   const maxRuns = readPositiveInt(env.EXTRACT_MAX_RUNS, DEFAULT_MAX_RUNS, 10);
   const results: MemoryExtractionRunResult[] = [];
   for (let i = 0; i < maxRuns; i += 1) {

@@ -375,6 +375,19 @@ hard delete: deleted/superseded/expired 超 365 天 → 先删 Vectorize 再删 
 | `MEMORY_INJECTION_MODE` | `text` | `text`=追加到 user 消息，`toolcall`=伪造 memory_context tool call |
 | `RECALL_SOURCE_BOOST` | `1.0` | source 为 model/mcp 的记忆得分乘数，`1.2` 适度加权 |
 
+### 角色记忆
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ROLE_MEMORY_ENABLED` | `false` | **角色记忆行为开关**。`false` 时仍保存 `role_id`/`role_name`，`fact_key` 仍按 `role_scope` 隔离，但**不启用**角色 baseline、角色日记、pending 注入、role boost 和多角色 dream 分组；`true` 时启用上述全部角色行为 |
+| `RECALL_ROLE_BOOST_EXACT` | `1.3` | role_id 精确匹配的记忆得分乘数（reranker 后应用） |
+| `RECALL_ROLE_BOOST_NAME` | `1.1` | 仅 role_name 匹配时的兜底乘数 |
+| `BASELINE_MAX_CHARS_PER_ROLE` | `2000` | 每个 role_scope 的 baseline 文本上限 |
+| `BASELINE_MAX_CHARS_TOTAL` | `8000` | 一次 dream 写入 baseline 的总量上限 |
+| `DREAM_MAX_ROLES_PER_RUN` | `5` | 单次做梦最多处理的角色数；超出直接失败不推进 cursor |
+
+> **`ROLE_MEMORY_ENABLED` 语义**：默认 `false` 不是"全部走 shared"。`false` 时新写入记忆仍带 `role_id/role_name`，`fact_key` 在 `namespace + role_scope + fact_key` 维度隔离；只是不启用 baseline 生成、角色日记写入、pending changelog 注入、role boost 加权、dream 多角色分组等角色行为。设为 `true` 后这些行为才生效。客户端始终应在请求中传 `role_id`/`role_name`，开关只控制服务端是否启用角色层行为。
+
 ### 高级
 
 | 变量 | 默认 | 说明 |

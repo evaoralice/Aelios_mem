@@ -11,8 +11,6 @@ ALTER TABLE memories ADD COLUMN role_scope TEXT NOT NULL DEFAULT 'shared';
 
 CREATE INDEX IF NOT EXISTS idx_memories_role_scope
 ON memories(namespace, role_scope, status);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_role_fact
-ON memory_lifecycle(namespace, role_scope, fact_key);
 
 -- === 2. messages 表加角色标签 ===
 ALTER TABLE messages ADD COLUMN role_id TEXT;
@@ -25,8 +23,11 @@ ON messages(namespace, role_id, created_at);
 ALTER TABLE conversations ADD COLUMN role_id TEXT;
 ALTER TABLE conversations ADD COLUMN role_name TEXT;
 
--- === 4. memory_lifecycle 加 role_scope ===
+-- === 4. memory_lifecycle 加 role_scope（必须在索引之前）===
 ALTER TABLE memory_lifecycle ADD COLUMN role_scope TEXT NOT NULL DEFAULT 'shared';
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_role_fact
+ON memory_lifecycle(namespace, role_scope, fact_key);
 
 -- === 5. daily_log 重建为含 role_scope ===
 -- 原 PK: (namespace, date) → 新 PK: (namespace, role_scope, date)

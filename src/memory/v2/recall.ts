@@ -153,6 +153,68 @@ function isDuplicateWithCore(content: string, core: CoreFingerprint): boolean {
 }
 
 // =====================================================================
+// P1-6: 跨 scope 近重复临时去重。
+// 当 shared 与某角色版本同时命中、内容高度重叠时, 只注入更高优先级的那条。
+// 优先级: 当前角色 > shared > 其他角色。相同优先级按 score 降序保留。
+// 被折叠的命中只在本次注入结果中剔除, 不删除数据库记录。
+// =====================================================================
+
+const CROSS_SCOPE_OVERLAP_THRESHOLD = 0.7; // 跨 scope 折叠阈值 (略高于核心层去重)
+const CROSS_SCOPE_MIN_TOKENS = 6; // 内容 token 数低于此值跳过跨 scope 折叠 (短内容易误判)
+
+function roleScopePriority(scope: string, requestScope: string): number {
+  if (scope === requestScope) return 0; // 当前角色最高
+  if (scope === "shared") return 1;
+  return 2; // 其他角色最低
+}
+
+function dedupeCrossScope(
+  hits: RecallHit[],
+  requestScope: string,
+  dedupedIdsOut: string[]
+): RecallHit[] {
+  // 按优先级 + score 排序: 优先级小在前, 同优先级 score 大在前
+  const sorted = [...hits].sort((a, b) => {
+    const pa = roleScopePriority(a.role_scope ?? "shared", requestScope);
+    const pb = roleScopePriority(b.role_scope ?? "shared", requestScope);
+    if (pa !== pb) return pa - pb;
+    return b.score - a.score;
+  });
+
+  const kept: RecallHit[] = [];
+  const keptTokenSets: Array<{ tokens: Set<string>; scope: string }> = [];
+
+  for (const hit of sorted) {
+    const tokens = tokenize(hit.content);
+    // 短内容跳过跨 scope 折叠 (token 数太少, jaccard 易饱和误判)
+    if (tokens.size < CROSS_SCOPE_MIN_TOKENS) {
+      kept.push(hit);
+      keptTokenSets.push({ tokens, scope: hit.role_scope ?? "shared" });
+      continue;
+    }
+    let isDup = false;
+    for (const keptEntry of keptTokenSets) {
+      if (keptEntry.tokens.size < CROSS_SCOPE_MIN_TOKENS) continue;
+      // 只在不同 scope 之间折叠; 同 scope 不在这里去重 (留给其他闸)
+      if (keptEntry.scope === (hit.role_scope ?? "shared")) continue;
+      if (jaccardOverlap(tokens, keptEntry.tokens) >= CROSS_SCOPE_OVERLAP_THRESHOLD) {
+        isDup = true;
+        break;
+      }
+    }
+    if (isDup) {
+      dedupedIdsOut.push(hit.id);
+      continue;
+    }
+    kept.push(hit);
+    keptTokenSets.push({ tokens, scope: hit.role_scope ?? "shared" });
+  }
+
+  // 重新按 score 降序返回 (不改变 kept 集合)
+  return kept.sort((a, b) => b.score - a.score);
+}
+
+// =====================================================================
 // boot: 冷启动包，输出稳定 + 确定性排序
 // SessionStart 调一次。客户端可塞进缓存前缀吃命中 (母帖第二节)。
 // =====================================================================
@@ -197,39 +259,34 @@ export async function buildBootPackage(
     });
   }
 
-  // 最近两天的日志 (dream 产出) — read shared + current role scope
+  // 最近两天的日志 (dream 产出) — P1-3: 当前请求只读当前角色最近两天
+  // 无角色绑定时使用 shared；不拼接其他角色日记。
   const roleScope = isRoleMemoryEnabled(env) ? computeRoleScope(input.roleId, input.roleName) : "shared";
-  const sharedLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope: "shared" });
-  const roleLogs = roleScope !== "shared"
-    ? await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope })
-    : [];
-  // Merge: shared logs + role logs, dedup by date (role takes precedence)
-  const logMap = new Map<string, { date: string; title: string; summary: string }>();
-  for (const r of sharedLogs) logMap.set(r.date, { date: r.date, title: r.title, summary: r.summary });
-  for (const r of roleLogs) logMap.set(r.date, { date: r.date, title: r.title, summary: r.summary });
-  const recent_logs = [...logMap.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 2);
+  let recent_logs: Array<{ date: string; title: string; summary: string }> = [];
+  if (roleScope === "shared") {
+    const sharedLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope: "shared" });
+    recent_logs = sharedLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary }))
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 2);
+  } else {
+    const roleLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope });
+    recent_logs = roleLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary }))
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 2);
+  }
 
-  // 长期基线文本 (only when role memory enabled)
-  // Sort: shared first, then current role, then other roles (by name)
+  // P1-2: 长期基线文本 — 角色功能开启且有当前角色时，只注入当前 role_scope 的 baseline。
+  // 不读取全部 baselines 后再排序；无当前角色时只读 shared baseline；无 baseline 时返回空数组。
   const requestRoleScope = isRoleMemoryEnabled(env) ? computeRoleScope(input.roleId, input.roleName) : "shared";
-  const baselines = isRoleMemoryEnabled(env)
-    ? (await getBaselines(env.DB, { namespace: input.namespace }))
-        .map((b) => ({
-          role_scope: b.role_scope,
-          content: b.content,
-          version: b.version,
-        }))
-        .sort((a, b) => {
-          // shared first
-          if (a.role_scope === "shared" && b.role_scope !== "shared") return -1;
-          if (b.role_scope === "shared" && a.role_scope !== "shared") return 1;
-          // current role second
-          if (a.role_scope === requestRoleScope && b.role_scope !== requestRoleScope) return -1;
-          if (b.role_scope === requestRoleScope && a.role_scope !== requestRoleScope) return 1;
-          // others alphabetical
-          return a.role_scope.localeCompare(b.role_scope);
-        })
-    : [];
+  let baselines: Array<{ role_scope: string; content: string; version: number }> = [];
+  if (isRoleMemoryEnabled(env)) {
+    const rows = await getBaselines(env.DB, { namespace: input.namespace, roleScope: requestRoleScope });
+    baselines = rows.map((b) => ({
+      role_scope: b.role_scope,
+      content: b.content,
+      version: b.version,
+    }));
+  }
 
   return {
     digest: digest ? { content: digest.content, updated_at: digest.updated_at } : null,
@@ -300,6 +357,7 @@ export interface RecallHit {
   type: string;
   score: number;
   source_layer: "glossary" | "memory" | "longtail";
+  role_scope?: string;
   // 闸二标记: 被核心层去重剔除的命中, 供调试/面板观察。
   deduped_against_core?: boolean;
 }
@@ -314,6 +372,13 @@ export interface RecallResult {
     floored_count: number;
     min_score: number;
     total: number;
+    cross_scope_deduped_ids?: string[];
+    // P1-4: boost 可观察命中统计
+    role_boosted_ids?: string[];        // 实际被 role boost 加权过的命中 id
+    role_boost_factor?: number;         // 本次使用的 boost 倍数 (1 = 未加权)
+    raw_recall_count?: number;          // 粗召回数量 (searchMemories 返回)
+    post_rerank_count?: number;         // reranker/压缩后剩余数量
+    final_injected_count?: number;      // 最终注入数量 (= hits.length)
   };
 }
 
@@ -324,7 +389,20 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
     return {
       hits: [],
       glossary_hits: [],
-      meta: { decayed_ids: [], deduped_ids: [], floored_ids: [], floored_count: 0, min_score: minScore, total: 0 }
+      meta: {
+        decayed_ids: [],
+        deduped_ids: [],
+        floored_ids: [],
+        floored_count: 0,
+        min_score: minScore,
+        total: 0,
+        cross_scope_deduped_ids: [],
+        role_boosted_ids: [],
+        role_boost_factor: 1,
+        raw_recall_count: 0,
+        post_rerank_count: 0,
+        final_injected_count: 0,
+      }
     };
   }
   const minScore = readRecallMinScore(env, input.min_score);
@@ -367,6 +445,8 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   const sourceBoost = readSourceBoost(env);
   // roleEnabled, roleBoostExact, roleBoostName, requestRoleId, requestRoleName already declared in step 2.1
   const decayedIds: string[] = [];
+  const roleBoostedIds: string[] = [];
+  let appliedBoostFactor = 1;
   const scored: RecallHit[] = memories.map((m) => {
     const decay = decayForLastInjected(m.last_injected_at ?? null, windowMs, factor);
     if (decay < 1) decayedIds.push(m.id);
@@ -375,15 +455,20 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
     let rBoost = 1;
     if (roleEnabled && requestRoleId && m.role_id === requestRoleId) {
       rBoost = roleBoostExact;
+      roleBoostedIds.push(m.id);
+      appliedBoostFactor = roleBoostExact;
     } else if (roleEnabled && !requestRoleId && requestRoleName && m.role_name && normalizeName(requestRoleName) === normalizeName(m.role_name)) {
       rBoost = roleBoostName;
+      roleBoostedIds.push(m.id);
+      appliedBoostFactor = roleBoostName;
     }
     return {
       id: m.id,
       content: m.content,
       type: m.type,
       score: (m.score ?? 0) * decay * sBoost * rBoost,
-      source_layer: "memory" as const
+      source_layer: "memory" as const,
+      role_scope: m.role_scope ?? "shared",
     };
   });
 
@@ -393,7 +478,7 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   //    recall 命中与之高度重叠的降到 0 分剔除, 不重复喂。
   const dedupedIds: string[] = [];
   const core = input.core_fingerprint ?? (await buildCoreFingerprintFromDb(env, input.namespace));
-  const afterDedup = core
+  const afterCoreDedup = core
     ? scored.filter((h) => {
         if (isDuplicateWithCore(h.content, core)) {
           dedupedIds.push(h.id);
@@ -402,6 +487,17 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
         return true;
       })
     : scored;
+
+  // 4.5 P1-6: 跨 scope 近重复临时去重。
+  //     优先级: 当前角色 > shared > 其他角色。相同优先级按 score 降序。
+  //     被折叠的命中不删除数据库记录, 只是从本次注入结果中剔除。
+  //     仅在角色记忆开启且当前请求有 role 时生效; 无角色时跳过 (shared 之间不去重)。
+  const crossScopeDedupedIds: string[] = [];
+  let afterDedup = afterCoreDedup;
+  if (roleEnabled && requestRoleId) {
+    const requestScope = computeRoleScope(requestRoleId, requestRoleName);
+    afterDedup = dedupeCrossScope(afterCoreDedup, requestScope, crossScopeDedupedIds);
+  }
 
   // 5. 长尾兜底 (L6): 只有 glossary + memories 闸二后全空才落 longtail。
   //    母帖逻辑优先级"全空才落长尾"——glossary 命中也算"前面非空"，
@@ -443,7 +539,14 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
       floored_ids: flooredIds,
       floored_count: flooredIds.length,
       min_score: minScore,
-      total: allHits.length
+      total: allHits.length,
+      cross_scope_deduped_ids: crossScopeDedupedIds,
+      // P1-4: boost 命中统计 (可观察)
+      role_boosted_ids: roleBoostedIds,
+      role_boost_factor: appliedBoostFactor,
+      raw_recall_count: rawMemories.length,
+      post_rerank_count: memories.length,
+      final_injected_count: allHits.length,
     }
   };
 }

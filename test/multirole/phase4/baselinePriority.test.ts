@@ -56,19 +56,18 @@ describe("Phase 4: baseline current-role priority", () => {
   });
 });
 
-describe("Phase 4: buildBootPackage baseline sorting", () => {
-  it("sorts baselines: shared first, then current role, then others", async () => {
-    const src = await import("../../../src/memory/v2/recall");
-    // Check source code has the sorting logic
+describe("Phase 4 / P1-2: buildBootPackage only fetches current role baseline", () => {
+  it("only queries baseline for the current role_scope, not all baselines", async () => {
+    // Source check: should query getBaselines with roleScope filter, not unfiltered.
     const fs = await import("fs");
     const path = await import("path");
     const code = fs.readFileSync(
       path.resolve(__dirname, "../../../src/memory/v2/recall.ts"),
       "utf-8"
     );
-    // Should have sorting with shared first and requestRoleScope
-    expect(code).toMatch(/shared.*first|role_scope === .shared.*return -1/);
-    expect(code).toMatch(/requestRoleScope/);
-    expect(code).toMatch(/localeCompare/);
+    // Should call getBaselines with roleScope=requestRoleScope (not unfiltered)
+    expect(code).toMatch(/getBaselines\(env\.DB,\s*\{\s*namespace:\s*input\.namespace,\s*roleScope:\s*requestRoleScope\s*\}\)/);
+    // Should NOT fetch all baselines then sort (P1-2 explicitly removes that)
+    expect(code).not.toMatch(/getBaselines\(env\.DB,\s*\{\s*namespace:\s*input\.namespace\s*\}\)/);
   });
 });

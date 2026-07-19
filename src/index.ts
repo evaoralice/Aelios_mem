@@ -156,7 +156,7 @@ export default {
     const shouldRunDailyMaintenance = !cron || cron === DAILY_MAINTENANCE_CRON;
     const tasks: Array<Promise<unknown>> = [];
 
-    if (shouldRunExtract) {
+    if (shouldRunExtract && env.ENABLE_AUTO_MEMORY !== "false") {
       tasks.push(runMemoryExtractionBatches(env, namespace, { scheduledTime: controller.scheduledTime }));
     }
 

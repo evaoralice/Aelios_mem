@@ -21,7 +21,9 @@ export function isSharedScope(roleScope: string): boolean {
   return roleScope === "shared";
 }
 
-// 角色记忆总开关。默认关闭，灰度发布时设为 true。
+// 角色记忆行为开关。默认 false。
+// false 时仍保存 role_id/role_name，fact_key 仍按 role_scope 隔离；
+// true 时启用 baseline / 角色日记 / pending 注入 / role boost / dream 多角色分组。
 export function isRoleMemoryEnabled(env: { ROLE_MEMORY_ENABLED?: string }): boolean {
   return env.ROLE_MEMORY_ENABLED === "true";
 }

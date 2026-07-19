@@ -41,7 +41,7 @@ export interface Env {
   RECALL_SOURCE_BOOST?: string;
   // 记忆注入方式: "text" (默认, 追加文本) | "toolcall" (伪造 tool call)
   MEMORY_INJECTION_MODE?: string;
-  // 角色记忆总开关，默认 false（全部走 shared）
+  // 角色记忆行为开关，默认 false（仍保存 role_id/role_name + fact_key 隔离，但不启用 baseline/日记/pending/boost/dream 分组）
   ROLE_MEMORY_ENABLED?: string;
   // 召回角色加权: role_id 精确匹配，默认 1.3
   RECALL_ROLE_BOOST_EXACT?: string;
