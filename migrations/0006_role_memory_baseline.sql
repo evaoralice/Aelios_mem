@@ -1,4 +1,4 @@
-# 0006_role_memory_baseline.sql
+-- 0006_role_memory_baseline.sql
 -- Aelios 角色记忆 + 长期基线
 -- ⚠️ daily_log 表迁移涉及 DROP TABLE + RENAME，执行前请先备份：
 --   wrangler d1 export companion_memory_proxy --output backup.sql
@@ -11,8 +11,8 @@ ALTER TABLE memories ADD COLUMN role_scope TEXT NOT NULL DEFAULT 'shared';
 
 CREATE INDEX IF NOT EXISTS idx_memories_role_scope
 ON memories(namespace, role_scope, status);
-CREATE INDEX IF NOT EXISTS idx_memories_role_fact
-ON memories(namespace, role_scope, fact_key);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_role_fact
+ON memory_lifecycle(namespace, role_scope, fact_key);
 
 -- === 2. messages 表加角色标签 ===
 ALTER TABLE messages ADD COLUMN role_id TEXT;

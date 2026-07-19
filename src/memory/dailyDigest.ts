@@ -28,7 +28,7 @@ import {
   markChangelogConflict,
   DIGEST_MAX_CHARS
 } from "../db/v2";
-import { computeRoleScope } from "../utils/role";
+import { computeRoleScope, isRoleMemoryEnabled } from "../utils/role";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -403,6 +403,49 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
         )
       : undefined;
 
+  // groups: multi-role dream output
+  const groups: DailyDigestResult["groups"] = Array.isArray(raw.groups)
+    ? raw.groups.flatMap((item): NonNullable<DailyDigestResult["groups"]>[number][] => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const record = item as Record<string, unknown>;
+        const roleScope = readString(record.role_scope);
+        if (!roleScope) return [];
+        const subUpdates = Array.isArray(record.memories_to_update)
+          ? record.memories_to_update.flatMap((sub): DigestMemoryUpdate[] => {
+              if (!sub || typeof sub !== "object" || Array.isArray(sub)) return [];
+              const subRecord = sub as Record<string, unknown>;
+              const targetId = readString(subRecord.target_id);
+              if (!targetId) return [];
+              return [{
+                target_id: targetId,
+                content: readString(subRecord.content) ?? undefined,
+                type: readString(subRecord.type) ?? undefined,
+                importance: typeof subRecord.importance === "number" ? clampScore(subRecord.importance, 0.7) : undefined,
+                confidence: typeof subRecord.confidence === "number" ? clampScore(subRecord.confidence, 0.82) : undefined,
+                tags: Array.isArray(subRecord.tags) ? readStringArray(subRecord.tags) : undefined,
+              }];
+            })
+          : undefined;
+        const subDeletes = Array.isArray(record.memories_to_delete)
+          ? record.memories_to_delete.flatMap((sub): DigestMemoryDelete[] => {
+              if (!sub || typeof sub !== "object" || Array.isArray(sub)) return [];
+              const subRecord = sub as Record<string, unknown>;
+              const targetId = readString(subRecord.target_id);
+              return targetId ? [{ target_id: targetId, reason: readString(subRecord.reason) ?? undefined }] : [];
+            })
+          : undefined;
+        return [{ role_scope: roleScope, memories_to_update: subUpdates, memories_to_delete: subDeletes }];
+      })
+    : undefined;
+
+  // If groups present, flatten into memories_to_update/delete for backward-compatible applyDreamV2
+  let flatUpdates = memories_to_update;
+  let flatDeletes = memories_to_delete;
+  if (groups && groups.length > 0) {
+    flatUpdates = groups.flatMap((g) => g.memories_to_update ?? []);
+    flatDeletes = groups.flatMap((g) => g.memories_to_delete ?? []);
+  }
+
   return {
     date: readString(raw.date) ?? undefined,
     title: readString(raw.title) ?? undefined,
@@ -415,9 +458,10 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
           return memory ? [memory] : [];
         })
       : undefined,
-    memories_to_update,
-    memories_to_delete,
+    memories_to_update: flatUpdates,
+    memories_to_delete: flatDeletes,
     baseline_texts,
+    groups,
   };
 }
 
@@ -776,17 +820,7 @@ async function applyPendingChanges(
   let conflicts = 0;
 
   // Get all pending entries for this namespace (all role_scopes)
-  const allPending = await listPendingChangelog(env.DB, { namespace, limit: 100 });
-  // Also get shared-scope entries
-  const sharedPending = await listPendingChangelog(env.DB, { namespace, roleScope: "shared", limit: 100 });
-  const combined = [...allPending, ...sharedPending];
-  // Deduplicate by id
-  const seen = new Set<string>();
-  const pending = combined.filter((c) => {
-    if (seen.has(c.id)) return false;
-    seen.add(c.id);
-    return true;
-  });
+  const pending = await listPendingChangelog(env.DB, { namespace, limit: 100 });
 
   for (const entry of pending) {
     try {
@@ -815,14 +849,14 @@ async function applyPendingChanges(
           conflicts++;
           continue;
         }
+        // Inherit role from target memory, not from changelog entry
         await supersedeMemory(env, {
           namespace,
           oldId: entry.target_id!,
           newContent: payload.content || entry.after_content || "",
           newType: payload.type || existing.type,
           source: "model",
-          roleId: entry.role_id,
-          roleName: entry.role_name,
+          // supersedeMemory defaults to inheriting old memory's role when roleId/roleName not passed
         });
         await markChangelogApplied(env.DB, { id: entry.id });
         applied++;
@@ -833,6 +867,7 @@ async function applyPendingChanges(
           conflicts++;
           continue;
         }
+        // Delete inherits role from target — no role params needed
         await archiveMemory(env, { namespace, id: entry.target_id! });
         await markChangelogApplied(env.DB, { id: entry.id });
         applied++;
@@ -888,7 +923,9 @@ async function applyDreamV2(
         confidence: item.confidence,
         tags: item.tags,
         source: "dream",
-        sourceMessageIds: messageIds
+        sourceMessageIds: messageIds,
+        roleId: existing.role_id ?? null,
+        roleName: existing.role_name ?? null,
       });
       updated++;
     } else if (item.content) {
@@ -897,7 +934,8 @@ async function applyDreamV2(
         oldId: item.target_id,
         newContent: item.content,
         newType: item.type,
-        reason: isReview ? "dream_review_proposal" : "dream_update"
+        reason: isReview ? "dream_review_proposal" : "dream_update",
+        source: "dream",
       });
       updated++;
     }
@@ -937,11 +975,13 @@ async function applyDreamV2(
     namespace,
     date: dateLabel,
     title: digest.title ?? dateLabel,
-    summary: digest.summary ?? ""
+    summary: digest.summary ?? "",
+    // Write to shared scope by default; multi-role dream will write per-role separately
+    roleScope: "shared",
   });
 
-  // Phase F/G: Generate and save baseline texts from dream output
-  const baselineTexts = digest.baseline_texts;
+  // Phase F/G: Generate and save baseline texts from dream output (only when role memory enabled)
+  const baselineTexts = isRoleMemoryEnabled(env) ? digest.baseline_texts : undefined;
   if (baselineTexts) {
     const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
     const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
@@ -1025,6 +1065,39 @@ export async function runDailyMemoryDigest(
   }
   const cleanedEmptyMemories = v2Enabled && strategy === "review" ? 0 : await cleanEmptyMemories(env, namespace);
 
+  // Phase G: Group messages by role_id for multi-role prompt
+  let roleGroups: Array<{ role_scope: string; role_name: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
+  if (isRoleMemoryEnabled(env)) {
+    const messagesByRole = new Map<string | null, MessageRecord[]>();
+    for (const msg of messages) {
+      const key = msg.role_id ?? null;
+      if (!messagesByRole.has(key)) messagesByRole.set(key, []);
+      messagesByRole.get(key)!.push(msg);
+    }
+    const sharedMessages = messagesByRole.get(null) ?? [];
+    if (messagesByRole.size > 1) {
+      const maxRoles = Number(env.DREAM_MAX_ROLES_PER_RUN ?? "5");
+      const roleEntries = [...messagesByRole.entries()]
+        .filter(([k]) => k !== null)
+        .slice(0, maxRoles);
+      roleGroups = [];
+      for (const [roleId, roleMsgs] of roleEntries) {
+        const roleName = roleMsgs[0]?.role_name ?? null;
+        const roleScope = computeRoleScope(roleId, roleName);
+        const roleMemories = await listMemoriesPage(env.DB, { namespace, status: "active", limit: memoryContextLimit, offset: 0 });
+        const roleMemRecords = roleMemories.records
+          .map((r) => toMemoryApiRecord(r))
+          .filter((m) => m.role_scope === roleScope || m.role_scope === "shared");
+        roleGroups.push({
+          role_scope: roleScope,
+          role_name: roleName,
+          messages: [...sharedMessages, ...roleMsgs],
+          memories: roleMemRecords,
+        });
+      }
+    }
+  }
+
   const prompt = buildDigestPrompt({
     dateLabel,
     startIso,
@@ -1032,7 +1105,8 @@ export async function runDailyMemoryDigest(
     messages,
     existingMemories,
     excerptLimit: readDreamExcerptLimit(env),
-    hasMore
+    hasMore,
+    roleGroups
   });
   const modelResult = await callDigestModel(env, prompt, {
     dateLabel,
@@ -1065,20 +1139,12 @@ export async function runDailyMemoryDigest(
 
   // v2 path: fact_key upsert + L1 digest + longtail + recent_logs
   if (v2Enabled && strategy !== "legacy") {
-    // Phase G: Apply pending changelog entries first (code execution, no model)
-    const pendingResult = await applyPendingChanges(env, namespace);
-    if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
-      console.log("dream: applied pending changes", pendingResult);
-    }
-
-    // Phase G: Group messages by role_id for multi-role dream
-    // TODO: When multi-role prompt is fully wired, pass roleGroups to buildDigestPrompt
-    // For now, grouping is computed but the model still uses the flat prompt format
-    const messagesByRole = new Map<string | null, MessageRecord[]>();
-    for (const msg of messages) {
-      const key = msg.role_id ?? null;
-      if (!messagesByRole.has(key)) messagesByRole.set(key, []);
-      messagesByRole.get(key)!.push(msg);
+    // Phase G: Apply pending changelog entries first (only when role memory enabled)
+    if (isRoleMemoryEnabled(env)) {
+      const pendingResult = await applyPendingChanges(env, namespace);
+      if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
+        console.log("dream: applied pending changes", pendingResult);
+      }
     }
 
     const v2Result = await applyDreamV2(env, {

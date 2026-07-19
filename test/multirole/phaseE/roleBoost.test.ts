@@ -6,9 +6,7 @@ vi.mock("../../../src/memory/search", () => ({
   toMemoryApiRecord: (r: any) => r,
 }));
 vi.mock("../../../src/memory/filter", () => ({
-  filterAndCompressMemories: vi.fn(async (_env: any, input: { memories: any[] }) =>
-    input.memories.map((m) => ({ ...m, score: m.score ?? 0.5 }))
-  ),
+  filterAndCompressMemories: vi.fn(),
 }));
 vi.mock("../../../src/memory/embedding", () => ({
   createEmbedding: vi.fn(async () => null),
@@ -31,6 +29,14 @@ function makeMemory(overrides: any = {}) {
   };
 }
 
+// Use mockImplementation so input scores (including pre-boost) are preserved
+function mockFilterPassThrough() {
+  vi.mocked(filterAndCompressMemories).mockImplementation(
+    async (_env: any, input: { memories: any[] }) =>
+      input.memories.map((m) => ({ ...m, score: m.score ?? 0.5 }))
+  );
+}
+
 function mockDb() {
   return createMockD1({
     onQuery: (sql: string) => {
@@ -47,22 +53,20 @@ describe("recall role boost (Phase E)", () => {
     const env = createMockEnv(mockDb(), {
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "a", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
       makeMemory({ id: "b", role_id: null, role_scope: "shared", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "a", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
-      makeMemory({ id: "b", role_id: null, role_scope: "shared", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001" } as any);
     const hitA = result.hits.find((h) => h.id === "a");
     const hitB = result.hits.find((h) => h.id === "b");
-    // alice-001 exact match: 0.5 * 1.3 = 0.65
+    // pre-boost: sqrt(1.3), post-boost: sqrt(1.3), total = 1.3
+    // 0.5 * 1.3 = 0.65
     expect(hitA!.score).toBeCloseTo(0.65, 5);
-    // shared: no boost
     expect(hitB!.score).toBeCloseTo(0.5, 5);
   });
 
@@ -70,17 +74,17 @@ describe("recall role boost (Phase E)", () => {
     const env = createMockEnv(mockDb(), {
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "c", role_id: null, role_name: "Alice", role_scope: "name:Alice", score: 0.4 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "c", role_id: null, role_name: "Alice", role_scope: "name:Alice", score: 0.4 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_name: "Alice" } as any);
     const hit = result.hits.find((h) => h.id === "c");
-    // name match: 0.4 * 1.1 = 0.44
+    // pre: sqrt(1.1), post: sqrt(1.1), total = 1.1
+    // 0.4 * 1.1 = 0.44
     expect(hit!.score).toBeCloseTo(0.44, 5);
   });
 
@@ -88,17 +92,15 @@ describe("recall role boost (Phase E)", () => {
     const env = createMockEnv(mockDb(), {
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "d", role_id: "bob-001", role_name: "Alice", role_scope: "id:bob-001", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "d", role_id: "bob-001", role_name: "Alice", role_scope: "id:bob-001", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001", role_name: "Alice" } as any);
     const hit = result.hits.find((h) => h.id === "d");
-    // different role_id → no boost despite same name
     expect(hit!.score).toBeCloseTo(0.5, 5);
   });
 
@@ -106,13 +108,12 @@ describe("recall role boost (Phase E)", () => {
     const env = createMockEnv(mockDb(), {
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "e", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "e", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test" } as any);
     const hit = result.hits.find((h) => h.id === "e");
@@ -124,17 +125,18 @@ describe("recall role boost (Phase E)", () => {
       RECALL_SOURCE_BOOST: "1.2",
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "f", role_id: "alice-001", role_scope: "id:alice-001", source: "mcp", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "f", role_id: "alice-001", role_scope: "id:alice-001", source: "mcp", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001" } as any);
     const hit = result.hits.find((h) => h.id === "f");
-    // source mcp * 1.2 * role exact * 1.3 = 0.5 * 1.2 * 1.3 = 0.78
+    // role: pre sqrt(1.3) * post sqrt(1.3) = 1.3
+    // source: 1.2
+    // 0.5 * 1.2 * 1.3 = 0.78
     expect(hit!.score).toBeCloseTo(0.78, 5);
   });
 
@@ -142,15 +144,13 @@ describe("recall role boost (Phase E)", () => {
     const env = createMockEnv(mockDb(), {
       RECALL_ROLE_BOOST_EXACT: "1.3",
       RECALL_ROLE_BOOST_NAME: "1.1",
+      ROLE_MEMORY_ENABLED: "true",
     });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "low", role_id: null, role_scope: "shared", score: 0.5 }),
       makeMemory({ id: "high", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "low", role_id: null, role_scope: "shared", score: 0.5 }),
-      makeMemory({ id: "high", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001" } as any);
     expect(result.hits[0].id).toBe("high");
@@ -158,17 +158,15 @@ describe("recall role boost (Phase E)", () => {
   });
 
   it("defaults to 1.3/1.1 when env vars not set", async () => {
-    const env = createMockEnv(mockDb()); // no boost env vars
+    const env = createMockEnv(mockDb(), { ROLE_MEMORY_ENABLED: "true" });
     vi.mocked(searchMemories).mockResolvedValue([
       makeMemory({ id: "g", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
     ]);
-    vi.mocked(filterAndCompressMemories).mockResolvedValue([
-      makeMemory({ id: "g", role_id: "alice-001", role_scope: "id:alice-001", score: 0.5 }),
-    ]);
+    mockFilterPassThrough();
 
     const result = await runRecall(env, { namespace: "ns", query: "test", role_id: "alice-001" } as any);
     const hit = result.hits.find((h) => h.id === "g");
-    // default 1.3: 0.5 * 1.3 = 0.65
+    // 0.5 * 1.3 = 0.65
     expect(hit!.score).toBeCloseTo(0.65, 5);
   });
 });

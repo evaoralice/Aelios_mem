@@ -21,6 +21,8 @@ interface StreamOpenAIOptions {
   provider: string;
   clientSystemHash?: string | null;
   cacheAnchorBlock?: string | null;
+  roleId?: string | null;
+  roleName?: string | null;
 }
 
 interface StreamState {
@@ -125,7 +127,9 @@ async function persistStreamResult(options: StreamOpenAIOptions, state: StreamSt
     provider: options.provider,
     stream: true,
     finishReason: state.finishReason,
-    usage: state.usage
+    usage: state.usage,
+    roleId: options.roleId ?? null,
+    roleName: options.roleName ?? null
   });
 
   await saveUsageLog(options.env.DB, {

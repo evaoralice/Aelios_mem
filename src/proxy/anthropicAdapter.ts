@@ -205,6 +205,29 @@ function appendUncachedUserContext(
 }
 
 /**
+ * Format dynamic memory patch + pending changes as a single text block
+ * for text-mode injection (Anthropic text mode + OpenAI path).
+ */
+function formatDynamicMemoryText(
+  dynamicMemoryPatch: string | null,
+  pendingChanges?: PendingChange[]
+): string | null {
+  const parts: string[] = [];
+  const trimmed = dynamicMemoryPatch?.trim();
+  if (trimmed) parts.push(trimmed);
+  if (pendingChanges && pendingChanges.length > 0) {
+    parts.push("=== 待处理变更（今日）===");
+    for (const c of pendingChanges) {
+      const desc = c.op === "delete"
+        ? `删除记忆 ${c.target_id}`
+        : `${c.op === "add" ? "新增" : "修改"} ${c.after_content ?? ""}`;
+      parts.push(desc);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+/**
  * Build synthetic_context for toolcall injection mode.
  * Converts the dynamic memory patch text into a fake tool_use/tool_result pair.
  */
@@ -664,7 +687,9 @@ export function buildAnthropicRequestFromAssembled(
   // dynamic_memory_patch: in text mode, append AFTER all cache breakpoints.
   // In toolcall mode, synthetic messages are already appended by assembledToAnthropicMessages.
   if (injectionMode === "text") {
-    appendUncachedUserContext(messages, dynamicMemoryPatch);
+    // Include pending changes in text mode too
+    const textToAppend = formatDynamicMemoryText(dynamicMemoryPatch, assembled.pending_changes);
+    appendUncachedUserContext(messages, textToAppend);
   }
 
   // Stable tools JSON: keys sorted, so Anthropic's cache sees identical bytes

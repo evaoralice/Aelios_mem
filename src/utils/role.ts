@@ -20,3 +20,8 @@ export function computeRoleScope(
 export function isSharedScope(roleScope: string): boolean {
   return roleScope === "shared";
 }
+
+// 角色记忆总开关。默认关闭，灰度发布时设为 true。
+export function isRoleMemoryEnabled(env: { ROLE_MEMORY_ENABLED?: string }): boolean {
+  return env.ROLE_MEMORY_ENABLED === "true";
+}

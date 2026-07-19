@@ -22,6 +22,8 @@ interface StreamAnthropicOptions {
   provider: string;
   clientSystemHash?: string | null;
   cacheAnchorBlock?: string | null;
+  roleId?: string | null;
+  roleName?: string | null;
 }
 
 interface ToolCallAccumulator {
@@ -199,7 +201,9 @@ async function persistStreamResult(options: StreamAnthropicOptions, state: Strea
     finishReason: state.finishReason,
     usage: state.usage,
     cacheMode: getAnthropicCacheMode(options.env),
-    cacheTtl: options.env.ANTHROPIC_CACHE_TTL || "5m"
+    cacheTtl: options.env.ANTHROPIC_CACHE_TTL || "5m",
+    roleId: options.roleId ?? null,
+    roleName: options.roleName ?? null
   });
 
   await saveUsageLog(options.env.DB, {

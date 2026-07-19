@@ -107,7 +107,7 @@ describe("migration file exists (Phase A)", () => {
     expect(src).toMatch(/CREATE TABLE IF NOT EXISTS long_term_baseline_snapshots/);
     // Indexes
     expect(src).toMatch(/idx_memories_role_scope/);
-    expect(src).toMatch(/idx_memories_role_fact/);
+    expect(src).toMatch(/idx_lifecycle_role_fact/);
     expect(src).toMatch(/idx_messages_role_created/);
     expect(src).toMatch(/idx_changelog_namespace_role_status/);
   });

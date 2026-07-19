@@ -7,6 +7,7 @@ import {
   supersedeMemory,
   upsertMemoryByFactKey
 } from "../db/v2";
+import { computeRoleScope } from "../utils/role";
 import { callOpenAICompat } from "../proxy/openaiAdapter";
 import type { Env, MessageRecord, OpenAIChatRequest, OpenAIChatResponse } from "../types";
 import { createEmbedding } from "./embedding";
@@ -296,12 +297,13 @@ async function findEmbeddingDuplicate(
 
 async function persistCandidate(
   env: Env,
-  input: { namespace: string; memory: ExtractedMemory; fallbackMessageIds: string[]; dedupCosine: number }
+  input: { namespace: string; memory: ExtractedMemory; fallbackMessageIds: string[]; dedupCosine: number; roleId?: string | null; roleName?: string | null }
 ): Promise<"created" | "superseded" | "duplicate" | "queued"> {
   const sourceMessageIds = input.memory.source_message_ids.length > 0
     ? input.memory.source_message_ids
     : input.fallbackMessageIds;
   const factKey = input.memory.fact_key?.trim();
+  const roleScope = computeRoleScope(input.roleId, input.roleName);
 
   if (input.memory.confidence < readReviewConfidence(env)) {
     await createMemoryCandidate(env.DB, {
@@ -319,7 +321,7 @@ async function persistCandidate(
   }
 
   if (factKey) {
-    const existing = await getActiveMemoryByFactKey(env.DB, { namespace: input.namespace, factKey });
+    const existing = await getActiveMemoryByFactKey(env.DB, { namespace: input.namespace, factKey, roleScope });
     if (existing) {
       if (await isSameFactByEmbedding(env, {
         existingContent: existing.content,
@@ -340,7 +342,9 @@ async function persistCandidate(
         tags: input.memory.tags,
         source: "extract",
         sourceMessageIds,
-        reason: "extract_fact_key"
+        reason: "extract_fact_key",
+        roleId: input.roleId,
+        roleName: input.roleName
       });
       return "superseded";
     }
@@ -354,7 +358,9 @@ async function persistCandidate(
       confidence: input.memory.confidence,
       tags: input.memory.tags,
       source: "extract",
-      sourceMessageIds
+      sourceMessageIds,
+      roleId: input.roleId,
+      roleName: input.roleName
     });
     return "created";
   }
@@ -378,14 +384,17 @@ async function persistCandidate(
     confidence: input.memory.confidence,
     tags: input.memory.tags,
     source: "extract",
-    sourceMessageIds
+    sourceMessageIds,
+    roleId: input.roleId,
+    roleName: input.roleName,
+    roleScope
   });
   return "created";
 }
 
 async function persistCandidates(
   env: Env,
-  input: { namespace: string; memories: ExtractedMemory[]; fallbackMessageIds: string[] }
+  input: { namespace: string; memories: ExtractedMemory[]; fallbackMessageIds: string[]; roleId?: string | null; roleName?: string | null }
 ): Promise<PersistStats> {
   const stats: PersistStats = { created: 0, superseded: 0, duplicate: 0, queued: 0, failed: 0 };
   const dedupCosine = readDedupCosine(env);
@@ -396,7 +405,9 @@ async function persistCandidates(
         namespace: input.namespace,
         memory,
         fallbackMessageIds: input.fallbackMessageIds,
-        dedupCosine
+        dedupCosine,
+        roleId: input.roleId,
+        roleName: input.roleName
       });
       stats[result] += 1;
     } catch (error) {
@@ -455,10 +466,16 @@ export async function runMemoryExtractionWindow(
   }
 
   const messageIds = messages.map((message) => message.id);
+  // Derive role from the most recent user message in the batch
+  const lastRoleMessage = [...messages].reverse().find((m) => m.role === "user");
+  const roleId = lastRoleMessage?.role_id ?? null;
+  const roleName = lastRoleMessage?.role_name ?? null;
   const persisted = await persistCandidates(env, {
     namespace,
     memories: modelResult.memories,
-    fallbackMessageIds: messageIds
+    fallbackMessageIds: messageIds,
+    roleId,
+    roleName
   });
   const lastMessage = messages[messages.length - 1];
   await writeCursor(env.DB, cursorName, lastMessage.created_at);

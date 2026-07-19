@@ -1,11 +1,29 @@
-import type { AssembledPrompt } from "../assembler/types";
+import type { AssembledPrompt, PendingChange } from "../assembler/types";
 import { assembledToOpenAIChatMessages } from "../assembler/toOpenAI";
 import type { Env, OpenAIChatRequest } from "../types";
 
 function stripClaudeNativeThinkingFields(req: OpenAIChatRequest): OpenAIChatRequest {
   const cleaned: OpenAIChatRequest = { ...req };
   delete cleaned.thinking;
+  // Remove Aelios private fields that must not be forwarded to upstream
+  delete (cleaned as any).role_id;
+  delete (cleaned as any).role_name;
   return cleaned;
+}
+
+/**
+ * Format pending changes as text for injection into the last user message.
+ */
+function formatPendingChangesText(pendingChanges?: PendingChange[]): string | null {
+  if (!pendingChanges || pendingChanges.length === 0) return null;
+  const lines = ["=== 待处理变更（今日）==="];
+  for (const c of pendingChanges) {
+    const desc = c.op === "delete"
+      ? `删除记忆 ${c.target_id}`
+      : `${c.op === "add" ? "新增" : "修改"} ${c.after_content ?? ""}`;
+    lines.push(desc);
+  }
+  return lines.join("\n");
 }
 
 export function buildOpenAICompatRequest(req: OpenAIChatRequest, targetModel: string): OpenAIChatRequest {
@@ -28,6 +46,25 @@ export function buildOpenAIRequestFromAssembled(
   assembled: AssembledPrompt
 ): OpenAIChatRequest {
   const messages = assembledToOpenAIChatMessages(assembled);
+  // Inject pending changes into the last user message for OpenAI path
+  const pendingText = formatPendingChangesText(assembled.pending_changes);
+  if (pendingText) {
+    let injected = false;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "user") {
+        const existing = messages[i].content;
+        if (typeof existing === "string") {
+          messages[i].content = `${existing}\n\n${pendingText}`;
+          injected = true;
+        }
+        // For array content (multimodal), don't modify — append separate message below
+        break;
+      }
+    }
+    if (!injected) {
+      messages.push({ role: "user", content: pendingText });
+    }
+  }
   return buildOpenAICompatRequest({ ...req, messages }, targetModel);
 }
 

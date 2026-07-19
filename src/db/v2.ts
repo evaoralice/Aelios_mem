@@ -1157,16 +1157,16 @@ export async function listPendingChangelog(
   db: D1Database,
   input: { namespace: string; roleScope?: string; limit?: number }
 ): Promise<MemoryChangelogRow[]> {
-  const roleScope = input.roleScope ?? "shared";
   const limit = input.limit ?? 10;
-  const result = await db
-    .prepare(
-      `SELECT * FROM memory_changelog
-       WHERE namespace = ? AND role_scope = ? AND status = 'pending'
-       ORDER BY created_at ASC LIMIT ?`
-    )
-    .bind(input.namespace, roleScope, limit)
-    .all<MemoryChangelogRow>();
+  let sql = `SELECT * FROM memory_changelog WHERE namespace = ? AND status = 'pending'`;
+  const binds: unknown[] = [input.namespace];
+  if (input.roleScope) {
+    sql += ` AND role_scope = ?`;
+    binds.push(input.roleScope);
+  }
+  sql += ` ORDER BY created_at ASC LIMIT ?`;
+  binds.push(limit);
+  const result = await db.prepare(sql).bind(...binds).all<MemoryChangelogRow>();
   return result.results ?? [];
 }
 

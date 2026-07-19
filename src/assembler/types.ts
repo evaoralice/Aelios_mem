@@ -172,13 +172,21 @@ export function formatBootStable(boot: BootPackage): string {
   const parts: string[] = [];
   if (boot.baselines && boot.baselines.length > 0) {
     const baselineEntries: string[] = [];
+    let totalChars = 0;
     for (const b of boot.baselines) {
       if (b.role_scope !== "shared") {
         baselineEntries.push(`[${b.role_scope}]`);
       }
-      baselineEntries.push(b.content);
+      // Truncate content if approaching total cap (8000 chars)
+      const remaining = 8000 - totalChars;
+      if (remaining <= 0) break;
+      const content = b.content.slice(0, remaining);
+      baselineEntries.push(content);
+      totalChars += content.length;
     }
-    parts.push("<long_term_baselines>", ...baselineEntries, "</long_term_baselines>");
+    if (baselineEntries.length > 0) {
+      parts.push("<long_term_baselines>", ...baselineEntries, "</long_term_baselines>");
+    }
   }
   if (boot.digest) {
     parts.push("<digest>", boot.digest.content, "</digest>");

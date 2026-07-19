@@ -8,7 +8,7 @@ import { assemble } from "../assembler/assemble";
 import { enqueueMemoryMaintenanceIfNeeded, enqueueRetentionIfNeeded } from "../queue/producer";
 import { buildBootPackage, isV2Enabled, runRecall } from "../memory/v2/recall";
 import { listPendingChangelog } from "../db/v2";
-import { computeRoleScope } from "../utils/role";
+import { computeRoleScope, isRoleMemoryEnabled } from "../utils/role";
 import {
   buildAnthropicRequestFromAssembled,
   callAnthropicNative,
@@ -113,7 +113,7 @@ export async function handleChatCompletions(
   const namespace = auth.profile.namespace;
   const lastUserText = extractLastUserText(body.messages);
 
-  const boot = isV2Enabled(env) ? await buildBootPackage(env, { namespace }) : null;
+  const boot = isV2Enabled(env) ? await buildBootPackage(env, { namespace, roleId: requestRoleId, roleName: requestRoleName }) : null;
   const recallResult = boot ? await runRecall(env, { namespace, query: lastUserText, role_id: requestRoleId, role_name: requestRoleName }) : null;
   const recallHitsAsMemories = recallResult
     ? recallResult.hits.map((h) => ({
@@ -147,11 +147,18 @@ export async function handleChatCompletions(
       }))
     : [];
 
-  // Phase F: read pending changelog entries for injection
+  // Phase F: read pending changelog entries for injection (shared + current role scope)
   const requestRoleScope = computeRoleScope(requestRoleId, requestRoleName);
-  const pendingRaw = isV2Enabled(env)
-    ? await listPendingChangelog(env.DB, { namespace, roleScope: requestRoleScope, limit: 10 })
-    : [];
+  let pendingRaw: Awaited<ReturnType<typeof listPendingChangelog>> = [];
+  if (isV2Enabled(env) && isRoleMemoryEnabled(env)) {
+    const sharedPending = await listPendingChangelog(env.DB, { namespace, roleScope: "shared", limit: 10 });
+    if (requestRoleScope !== "shared") {
+      const rolePending = await listPendingChangelog(env.DB, { namespace, roleScope: requestRoleScope, limit: 10 });
+      pendingRaw = [...sharedPending, ...rolePending].sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(0, 10);
+    } else {
+      pendingRaw = sharedPending;
+    }
+  }
   const pendingChanges = pendingRaw.map((c) => ({
     op: c.op,
     after_content: c.after_content,
@@ -187,6 +194,7 @@ export async function handleChatCompletions(
         ragMemories: recallHitsAsMemories,
         visionOutput: null,
       });
+      assembled.pending_changes = pendingChanges;
       clientSystemHash = assembled.meta.client_system_hash;
       upstream = await callOpenAICompat(env, buildOpenAIRequestFromAssembled(body, targetModel, assembled));
     }
@@ -217,7 +225,9 @@ export async function handleChatCompletions(
         upstreamModel: targetModel,
         provider,
         clientSystemHash,
-        cacheAnchorBlock
+        cacheAnchorBlock,
+        roleId: requestRoleId,
+        roleName: requestRoleName
       });
     }
 
@@ -231,7 +241,9 @@ export async function handleChatCompletions(
       upstreamModel: targetModel,
       provider,
       clientSystemHash,
-      cacheAnchorBlock
+      cacheAnchorBlock,
+      roleId: requestRoleId,
+      roleName: requestRoleName
     });
   }
 
@@ -324,7 +336,9 @@ export async function handleChatCompletions(
     provider,
     stream: false,
     finishReason: parsed.choices?.[0]?.finish_reason,
-    usage: parsed.usage
+    usage: parsed.usage,
+    roleId: requestRoleId,
+    roleName: requestRoleName
   });
 
   ctx.waitUntil(

@@ -319,7 +319,7 @@ function getTools(): Array<Record<string, unknown>> {
       name: "memory_change_update",
       description:
         "提交修改记忆的变更日志（pending）。凌晨做梦时由代码应用。" +
-        "需要目标记忆的 target_id。",
+        "需要目标记忆的 target_id。归属从目标记忆继承，不接受 role_id/role_name 参数。",
       inputSchema: {
         type: "object",
         properties: {
@@ -327,8 +327,6 @@ function getTools(): Array<Record<string, unknown>> {
           content: { type: "string" },
           type: { type: "string" },
           importance: { type: "number" },
-          role_id: { type: "string" },
-          role_name: { type: "string" },
           reason: { type: "string" }
         },
         required: ["target_id", "content"]
@@ -337,7 +335,7 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "memory_change_delete",
       description:
-        "提交删除记忆的变更日志（pending）。凌晨做梦时由代码应用。",
+        "提交删除记忆的变更日志（pending）。凌晨做梦时由代码应用。归属从目标记忆继承。",
       inputSchema: {
         type: "object",
         properties: {
@@ -632,7 +630,9 @@ export async function callTool(
       query,
       k: readNumber(args.k, 20),
       min_score: typeof args.min_score === "number" ? readNumber(args.min_score, 0.15) : undefined,
-      types: readStringArray(args.types)
+      types: readStringArray(args.types),
+      role_id: readString(args.role_id) ?? null,
+      role_name: readString(args.role_name) ?? null
     });
     return textToolResult({ data: result });
   }
@@ -727,8 +727,7 @@ export async function callTool(
         importance: readNumber(args.importance, 0.6),
       }),
       reason: readString(args.reason) ?? null,
-      roleId: readString(args.role_id) ?? null,
-      roleName: readString(args.role_name) ?? null,
+      // Role is NOT accepted from args — inherited from target at apply time
     });
     return textToolResult({ data: row });
   }
@@ -743,6 +742,7 @@ export async function callTool(
       targetId,
       payloadJson: JSON.stringify({}),
       reason: readString(args.reason) ?? null,
+      // Role is NOT accepted — inherited from target at apply time
     });
     return textToolResult({ data: row });
   }

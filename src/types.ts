@@ -51,6 +51,8 @@ export interface Env {
   BASELINE_MAX_CHARS_PER_ROLE?: string;
   // 基线文本总量上限，默认 8000
   BASELINE_MAX_CHARS_TOTAL?: string;
+  // 单次做梦最多处理角色数，默认 5
+  DREAM_MAX_ROLES_PER_RUN?: string;
   ENABLE_DAILY_MEMORY_DIGEST?: string;
   DREAM_NAMESPACE?: string;
   DREAM_MAX_MESSAGES?: string;

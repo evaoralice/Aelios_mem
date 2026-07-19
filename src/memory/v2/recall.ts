@@ -24,6 +24,7 @@ import { searchMemories } from "../search";
 import { filterAndCompressMemories } from "../filter";
 import { createEmbedding } from "../embedding";
 import type { Env, MemoryApiRecord } from "../../types";
+import { isRoleMemoryEnabled, computeRoleScope } from "../../utils/role";
 
 // --- 开关 ---
 
@@ -170,7 +171,7 @@ const BOOT_SCHEMA_VERSION = "v2-1";
 
 export async function buildBootPackage(
   env: Env,
-  input: { namespace: string }
+  input: { namespace: string; roleId?: string | null; roleName?: string | null }
 ): Promise<BootPackage> {
   const digest = await getDigest(env.DB, input.namespace);
   const preciousRows = await listPrecious(env.DB, {
@@ -196,24 +197,39 @@ export async function buildBootPackage(
     });
   }
 
-  // 最近两天的日志 (dream 产出)
-  const recentLogRows = await getRecentDailyLogs(env.DB, {
-    namespace: input.namespace,
-    limit: 2
-  });
-  const recent_logs = recentLogRows.map((r) => ({
-    date: r.date,
-    title: r.title,
-    summary: r.summary
-  }));
+  // 最近两天的日志 (dream 产出) — read shared + current role scope
+  const roleScope = isRoleMemoryEnabled(env) ? computeRoleScope(input.roleId, input.roleName) : "shared";
+  const sharedLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope: "shared" });
+  const roleLogs = roleScope !== "shared"
+    ? await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope })
+    : [];
+  // Merge: shared logs + role logs, dedup by date (role takes precedence)
+  const logMap = new Map<string, { date: string; title: string; summary: string }>();
+  for (const r of sharedLogs) logMap.set(r.date, { date: r.date, title: r.title, summary: r.summary });
+  for (const r of roleLogs) logMap.set(r.date, { date: r.date, title: r.title, summary: r.summary });
+  const recent_logs = [...logMap.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 2);
 
-  // 长期基线文本
-  const baselineRows = await getBaselines(env.DB, { namespace: input.namespace });
-  const baselines = baselineRows.map((b) => ({
-    role_scope: b.role_scope,
-    content: b.content,
-    version: b.version,
-  }));
+  // 长期基线文本 (only when role memory enabled)
+  // Sort: shared first, then current role, then other roles (by name)
+  const requestRoleScope = isRoleMemoryEnabled(env) ? computeRoleScope(input.roleId, input.roleName) : "shared";
+  const baselines = isRoleMemoryEnabled(env)
+    ? (await getBaselines(env.DB, { namespace: input.namespace }))
+        .map((b) => ({
+          role_scope: b.role_scope,
+          content: b.content,
+          version: b.version,
+        }))
+        .sort((a, b) => {
+          // shared first
+          if (a.role_scope === "shared" && b.role_scope !== "shared") return -1;
+          if (b.role_scope === "shared" && a.role_scope !== "shared") return 1;
+          // current role second
+          if (a.role_scope === requestRoleScope && b.role_scope !== requestRoleScope) return -1;
+          if (b.role_scope === requestRoleScope && a.role_scope !== requestRoleScope) return 1;
+          // others alphabetical
+          return a.role_scope.localeCompare(b.role_scope);
+        })
+    : [];
 
   return {
     digest: digest ? { content: digest.content, updated_at: digest.updated_at } : null,
@@ -334,32 +350,32 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   //      prepareCandidates: 去重、sanitize、min score 过滤、按质量排序
   //      rerankMemories: Workers AI bge-reranker-base 重排
   //      LLM compress: 小模型把每条压缩成短句，无关的输出 null 剔除
+  const roleEnabled = isRoleMemoryEnabled(env);
+  const roleBoostExact = readRoleBoostExact(env);
+  const roleBoostName = readRoleBoostName(env);
+  const requestRoleId = input.role_id ?? null;
+  const requestRoleName = input.role_name ?? null;
   const memories = await filterAndCompressMemories(env, {
     query,
     memories: rawMemories
   });
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)
-  //    source 加权: model/mcp 来源的记忆得分 × RECALL_SOURCE_BOOST (默认 1.0)
-  //    role 加权: role_id 精确匹配 × RECALL_ROLE_BOOST_EXACT (默认 1.3)
-  //              role_name 兜底匹配 × RECALL_ROLE_BOOST_NAME (默认 1.1)
+  //    source 加权 + role 加权 (full boost applied here, pre-boost was in step 2.1)
   const windowMs = injectDecayWindowMs(env);
   const factor = injectDecayFactor(env);
   const sourceBoost = readSourceBoost(env);
-  const roleBoostExact = readRoleBoostExact(env);
-  const roleBoostName = readRoleBoostName(env);
-  const requestRoleId = input.role_id ?? null;
-  const requestRoleName = input.role_name ?? null;
+  // roleEnabled, roleBoostExact, roleBoostName, requestRoleId, requestRoleName already declared in step 2.1
   const decayedIds: string[] = [];
   const scored: RecallHit[] = memories.map((m) => {
     const decay = decayForLastInjected(m.last_injected_at ?? null, windowMs, factor);
     if (decay < 1) decayedIds.push(m.id);
     const sBoost = sourceBoost > 1 && (m.source === "model" || m.source === "mcp") ? sourceBoost : 1;
-    // Role boost
+    // Role boost (only when role memory enabled) — full boost applied post-reranker
     let rBoost = 1;
-    if (requestRoleId && m.role_id === requestRoleId) {
+    if (roleEnabled && requestRoleId && m.role_id === requestRoleId) {
       rBoost = roleBoostExact;
-    } else if (!requestRoleId && requestRoleName && m.role_name && normalizeName(requestRoleName) === normalizeName(m.role_name)) {
+    } else if (roleEnabled && !requestRoleId && requestRoleName && m.role_name && normalizeName(requestRoleName) === normalizeName(m.role_name)) {
       rBoost = roleBoostName;
     }
     return {

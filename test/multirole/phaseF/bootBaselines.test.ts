@@ -26,7 +26,7 @@ describe("Phase F: baselines in BootPackage", () => {
         return [];
       },
     });
-    const env = createMockEnv(db);
+    const env = createMockEnv(db, { ROLE_MEMORY_ENABLED: "true" });
     const pkg = await buildBootPackage(env, { namespace: "ns" });
     expect(pkg).toHaveProperty("baselines");
     expect(pkg.baselines).toHaveLength(1);
@@ -36,7 +36,7 @@ describe("Phase F: baselines in BootPackage", () => {
 
   it("returns empty baselines when none exist", async () => {
     const db = createMockD1({ onQuery: () => [] });
-    const env = createMockEnv(db);
+    const env = createMockEnv(db, { ROLE_MEMORY_ENABLED: "true" });
     const pkg = await buildBootPackage(env, { namespace: "ns" });
     expect(pkg.baselines).toEqual([]);
   });
@@ -53,7 +53,7 @@ describe("Phase F: baselines in BootPackage", () => {
         return [];
       },
     });
-    const env = createMockEnv(db);
+    const env = createMockEnv(db, { ROLE_MEMORY_ENABLED: "true" });
     const pkg = await buildBootPackage(env, { namespace: "ns" });
     expect(pkg.baselines).toHaveLength(2);
   });
