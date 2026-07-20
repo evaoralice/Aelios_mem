@@ -27,6 +27,7 @@ import {
   markChangelogApplied,
   markChangelogConflict,
   getBaselines,
+  getDailyLog,
   DIGEST_MAX_CHARS
 } from "../db/v2";
 import { computeRoleScope, isRoleMemoryEnabled } from "../utils/role";
@@ -524,7 +525,8 @@ function buildDigestPrompt(input: {
   existingMemories: MemoryApiRecord[];
   excerptLimit: number;
   hasMore: boolean;
-  roleGroups?: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
+  roleGroups?: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
+  existingSharedDailyLog?: { title: string; summary: string } | null;
 }): string {
   const hasRoleGroups = input.roleGroups && input.roleGroups.length > 0;
   return [
@@ -561,8 +563,14 @@ function buildDigestPrompt(input: {
       "- 角色组只能修改/删除 role_scope 等于该组 role_scope 的记忆，跨 scope 操作会被丢弃。",
       "- 同一 target_id 在一次 dream 中只能出现一次操作；如重复出现以第一条为准。",
       "",
+      "分批合并规则：",
+      "- 当天可能被分批整理。如果某角色组提供了「已有当日日记」，说明本批不是首批。",
+      "- 你必须把已有日记的内容融合进本批新消息，输出该角色当天的合并版完整 daily_log，而不是只总结本批。",
+      "- 不要丢失前批已记录的要点；如果前批要点已被后续证据修正，可在 summary 中体现，但不要凭空删掉。",
+      "- baseline 仍按旧 baseline 继承规则生成，不因分批而丢失。",
+      "",
       "每个角色组必须输出：",
-      "- daily_log：该角色视角的当日标题和分条列点 summary（每条一行「- 」开头，整体 ≤800 字），写当天互动要点，不写流水账。",
+      "- daily_log：该角色视角的当日标题和分条列点 summary（每条一行「- 」开头，整体 ≤800 字），写当天互动要点，不写流水账。若已有日记存在，输出合并后的完整版。",
       "- baseline：该角色对用户的长期印象（不是当天流水账）。要求：写角色如何理解用户、关系状态、相处经验与长期应对方式；忠实继承旧 baseline 中未被新证据推翻的部分；不把一次性安排写成永久印象；不混入其他角色视角；若旧 baseline 为空就基于当天素材生成首版。",
       "- memories_to_update / memories_to_delete：仅限同 role_scope 的 target_id。",
       "",
@@ -587,6 +595,14 @@ function buildDigestPrompt(input: {
       "- memories_to_update 只针对给出的旧记忆 id。",
       "- memories_to_delete 只删除空、重复、明显过期或被新信息否定的旧记忆。",
       "- 控制总输出长度，宁可少写也不要输出超长 JSON。",
+      ...(input.existingSharedDailyLog ? [
+        "",
+        "分批合并：",
+        "- 已有当日日记（本批不是首批）：",
+        `  标题：${input.existingSharedDailyLog.title}`,
+        `  摘要：${input.existingSharedDailyLog.summary}`,
+        "- 你必须把已有日记融合进本批新消息，输出当天的合并版完整 summary，不要只总结本批，不要丢失前批要点。",
+      ] : []),
       "",
       "输出 JSON 结构：",
       JSON.stringify({
@@ -622,6 +638,9 @@ function buildDigestPrompt(input: {
           [
             `=== [${g.role_scope === "shared" ? "共享" : g.role_name ?? g.role_scope}] ===`,
             g.oldBaseline ? `旧 baseline（请忠实继承，仅在有新证据时更新）：\n${g.oldBaseline}` : "（无旧 baseline，基于当天素材生成首版）",
+            g.existingDailyLog
+              ? `已有当日日记（本批不是首批，请合并输出完整版）：\n  标题：${g.existingDailyLog.title}\n  摘要：${g.existingDailyLog.summary}`
+              : "（本批是首批，基于本批素材生成首版日记）",
             "可修改的旧记忆（role_scope 与本组一致）：",
             formatExistingMemories(g.memories),
             "今日聊天：",
@@ -952,19 +971,25 @@ async function applyDreamV2(
   const flatDeletes: DigestMemoryDelete[] = [];
 
   if (digest.groups && digest.groups.length > 0) {
-    // Track seen target_ids within this dream to detect conflicts
-    const seenTargets = new Set<string>();
+    // P1 重复 target 真正阻止:
+    // 第一阶段统计每个 target_id 在本次 dream 中出现的 op 次数（update + delete 各算一次）。
+    // 同 target 出现 >1 次 op（含同 op 重复、update+delete 混合）视为冲突，全部跳过。
+    const targetOpCount = new Map<string, number>();
+    for (const group of digest.groups) {
+      for (const op of [...(group.memories_to_update ?? []), ...(group.memories_to_delete ?? [])]) {
+        targetOpCount.set(op.target_id, (targetOpCount.get(op.target_id) ?? 0) + 1);
+      }
+    }
+    const isConflicted = (id: string) => (targetOpCount.get(id) ?? 0) > 1;
+
     for (const group of digest.groups) {
       const groupScope = group.role_scope;
       const canModify = groupScopes.has(groupScope);
-      for (const op of [...(group.memories_to_update ?? []), ...(group.memories_to_delete ?? [])]) {
-        if (seenTargets.has(op.target_id)) {
-          console.warn(`dream: target ${op.target_id} appears multiple times in dream output; skipping duplicate op`);
+      for (const upd of group.memories_to_update ?? []) {
+        if (isConflicted(upd.target_id)) {
+          console.warn(`dream: target ${upd.target_id} appears multiple times in dream output; skipping update (conflict)`);
           continue;
         }
-        seenTargets.add(op.target_id);
-      }
-      for (const upd of group.memories_to_update ?? []) {
         if (!canModify) {
           console.warn(`dream: group ${groupScope} cannot modify targets (not in allowed scopes); skipping update ${upd.target_id}`);
           continue;
@@ -984,6 +1009,10 @@ async function applyDreamV2(
         flatUpdates.push(upd);
       }
       for (const del of group.memories_to_delete ?? []) {
+        if (isConflicted(del.target_id)) {
+          console.warn(`dream: target ${del.target_id} appears multiple times in dream output; skipping delete (conflict)`);
+          continue;
+        }
         if (!canModify) {
           console.warn(`dream: group ${groupScope} cannot modify targets; skipping delete ${del.target_id}`);
           continue;
@@ -1074,14 +1103,28 @@ async function applyDreamV2(
     await upsertDigest(env.DB, { namespace, content: truncate(digestContent, DIGEST_MAX_CHARS) });
   }
 
-  // P1-3: Per-role daily_log + baseline write (only when role memory enabled)
+  // P1-3 + P1 写入白名单: Per-role daily_log + baseline write (only when role memory enabled)
+  // 只允许写入本次实际构建的 roleGroups 中存在的 scope，防止模型凭空生成不存在的角色组。
+  // 同一 scope 重复出现时只接受第一个 group（确定性）。
   const roleEnabled = isRoleMemoryEnabled(env);
   if (roleEnabled && digest.groups && digest.groups.length > 0) {
     const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
     const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
     let totalBaselineChars = 0;
+    const seenWriteScopes = new Set<string>();
     for (const group of digest.groups) {
       const scope = group.role_scope;
+      // 白名单校验：scope 必须在本次实际构建的 roleGroups 中
+      if (!groupScopes.has(scope)) {
+        console.warn(`dream: group scope ${scope} not in allowed scopes ${[...groupScopes].join(",")}; skipping daily_log/baseline write`);
+        continue;
+      }
+      // 重复 scope 去重：只接受第一个
+      if (seenWriteScopes.has(scope)) {
+        console.warn(`dream: duplicate group for scope ${scope}; only first accepted for daily_log/baseline write`);
+        continue;
+      }
+      seenWriteScopes.add(scope);
       // P1-3: write per-role daily_log
       if (group.daily_log && (group.daily_log.title || group.daily_log.summary)) {
         await upsertDailyLog(env.DB, {
@@ -1210,7 +1253,7 @@ export async function runDailyMemoryDigest(
 
   // P0-4: Group messages by computeRoleScope (not by raw role_id), and trigger grouping
   // whenever at least one non-shared role exists (no longer requires size > 1).
-  let roleGroups: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
+  let roleGroups: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
   if (roleEnabled) {
     // Group messages by computeRoleScope
     const messagesByScope = new Map<string, MessageRecord[]>();
@@ -1254,14 +1297,38 @@ export async function runDailyMemoryDigest(
         } catch (error) {
           console.warn(`dream: failed to read baseline for ${scope}`, error);
         }
+        // P0: 分批合并 — 读取该角色当天已有 daily_log，喂给模型做合并
+        let existingDailyLog: { title: string; summary: string } | null = null;
+        try {
+          const existingLog = await getDailyLog(env.DB, { namespace, date: dateLabel, roleScope: scope });
+          if (existingLog && (existingLog.title || existingLog.summary)) {
+            existingDailyLog = { title: existingLog.title, summary: existingLog.summary };
+          }
+        } catch (error) {
+          console.warn(`dream: failed to read existing daily_log for ${scope}`, error);
+        }
         roleGroups.push({
           role_scope: scope,
           role_name: roleName,
           oldBaseline,
+          existingDailyLog,
           messages: roleMsgs,
           memories: roleMemories,
         });
       }
+    }
+  }
+
+  // P0: 分批合并 — 非角色路径读取已有 shared daily_log 喂入 prompt
+  let existingSharedDailyLog: { title: string; summary: string } | null = null;
+  if (!roleGroups) {
+    try {
+      const existingLog = await getDailyLog(env.DB, { namespace, date: dateLabel, roleScope: "shared" });
+      if (existingLog && (existingLog.title || existingLog.summary)) {
+        existingSharedDailyLog = { title: existingLog.title, summary: existingLog.summary };
+      }
+    } catch (error) {
+      console.warn(`dream: failed to read existing shared daily_log`, error);
     }
   }
 
@@ -1273,7 +1340,8 @@ export async function runDailyMemoryDigest(
     existingMemories,
     excerptLimit: readDreamExcerptLimit(env),
     hasMore,
-    roleGroups
+    roleGroups,
+    existingSharedDailyLog
   });
   const modelResult = await callDigestModel(env, prompt, {
     dateLabel,

@@ -14,6 +14,16 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `HANDOVER.md` — 前一轮 5 阶段缓存与记忆改造的交接文档
 - `.cc-connect/attachments/Aelios_multirole_fix_checklist.md` — 最新修复清单（P0/P1/行为测试）
 
+**补充修复相关文件（第二轮）：**
+- `src/memory/dailyDigest.ts` — 补-P0 分批合并 + 补-P1 写入白名单 + 补-P1 重复 target 真正阻止
+- `src/utils/roleContext.ts` — 补-P1 Operit `<aelios_role_context>` 标记解析
+- `src/api/chatCompletions.ts` — 入口解析标记，覆盖 body 顶层 role_id/role_name 并剥离标记块
+- `src/db/v2.ts` — `getDailyLog` 已存在，被 dailyDigest 新调用
+- `test/multirole/p0/batchDailyLogMerge.test.ts` — 补-P0 测试 5 项
+- `test/multirole/p0/dreamGroupWriteWhitelist.test.ts` — 补-P1 写入白名单测试 4 项
+- `test/multirole/p0/duplicateTargetConflict.test.ts` — 补-P1 重复 target 测试 5 项
+- `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析测试 10 项
+
 **前置条件：** Phase 1-5 缓存与记忆改造已完成（分支 `feat/cache-memory-tweak`）。
 
 ---
@@ -51,6 +61,15 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 | P1-4 | boost 后置 | ✅ | 去掉 pre-boost，只在 reranker 后应用完整 boost |
 | P1-5 | ROLE_MEMORY_ENABLED 文档 | ✅ | README 加"角色记忆"段落 + 语义说明；types.ts/role.ts 注释更新 |
 | P1-6 | 召回去重 | ✅ | dedupeCrossScope 在闸二后按 当前角色>shared>其他 优先级折叠近重复；短内容跳过避免误判；不删数据库记录 |
+
+### 补充修复（第二轮）
+
+| 项 | 内容 | 状态 | 备注 |
+|---|------|------|------|
+| 补-P0 | 同日分批日记被覆盖 | ✅ | 非首批读取已有 daily_log 喂入 prompt（角色组按 scope 分别读 + 非角色路径读 shared）；prompt 要求模型输出合并版完整 daily_log；baseline 仍按旧 baseline 继承规则，不因分批丢失 |
+| 补-P1 | Dream 输出角色组缺写入白名单 | ✅ | applyDreamV2 写 daily_log/baseline 时用 groupScopes 过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn |
+| 补-P1 | 重复 target 检测只 warn 不阻止 | ✅ | 改为两阶段：先统计每个 target_id 的 op 次数（update + delete 各算一次），只对 op 次数==1 的 target 执行；同 target 同时 update+delete 视为冲突，两个都不执行 |
+| 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` 解析 `<aelios_role_context>` JSON 标记；chatCompletions 入口解析后覆盖 body 顶层 role_id/role_name 并从 messages 中剥离标记块（不转发上游）；system 优先于 user |
 
 ### 待做 — 行为测试
 

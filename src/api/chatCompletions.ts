@@ -25,6 +25,7 @@ import type { Env, OpenAIChatMessage, OpenAIChatRequest, OpenAIChatResponse } fr
 import { openAiError } from "../utils/json";
 import { hasImageContent } from "../utils/messages";
 import { readString } from "../utils/request";
+import { stripRoleContextFromMessages } from "../utils/roleContext";
 
 function extractAssistantText(response: OpenAIChatResponse): string {
   const message = response.choices?.[0]?.message;
@@ -70,6 +71,16 @@ export async function handleChatCompletions(
 
   if (!Array.isArray(body.messages)) {
     return openAiError("messages must be an array", 400);
+  }
+
+  // Operit 角色身份标记解析: 优先级高于 body 顶层 role_id/role_name。
+  // 从 messages 中解析 <aelios_role_context> 标记, 提取 role_id/role_name,
+  // 并从 messages 中剥离标记块 (不转发给上游模型)。
+  const { messages: strippedMessages, roleContext: operitRole } = stripRoleContextFromMessages(body.messages);
+  if (operitRole) {
+    body.messages = strippedMessages;
+    if (operitRole.role_id) body.role_id = operitRole.role_id;
+    if (operitRole.role_name) body.role_name = operitRole.role_name;
   }
 
   let targetModel: string;

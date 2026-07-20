@@ -50,6 +50,7 @@ const listPendingChangelog = vi.fn<(...args: any[]) => Promise<any[]>>(async () 
 const markChangelogApplied = vi.fn<(...args: any[]) => Promise<void>>(async () => {});
 const markChangelogConflict = vi.fn<(...args: any[]) => Promise<void>>(async () => {});
 const getBaselines = vi.fn<(...args: any[]) => Promise<any[]>>(async () => [] as any[]);
+const getDailyLog = vi.fn<(...args: any[]) => Promise<any>>(async () => null);
 const fetchMemoryLifecycleRows = vi.fn<(...args: any[]) => Promise<any[]>>(async () => [] as any[]);
 const upsertMemoryByFactKey = vi.fn<(...args: any[]) => Promise<any>>(async () => ({}));
 const supersedeMemory = vi.fn<(...args: any[]) => Promise<any>>(async () => ({}));
@@ -72,6 +73,7 @@ vi.mock("../../../src/db/v2", async (importOriginal) => {
     markChangelogApplied: (...args: any[]) => markChangelogApplied(...args),
     markChangelogConflict: (...args: any[]) => markChangelogConflict(...args),
     getBaselines: (...args: any[]) => getBaselines(...args),
+    getDailyLog: (...args: any[]) => getDailyLog(...args),
   };
 });
 
@@ -104,6 +106,7 @@ beforeEach(() => {
   callOpenAICompat.mockResolvedValue(new Response("{}", { status: 200 }));
   listPendingChangelog.mockResolvedValue([]);
   getBaselines.mockResolvedValue([]);
+  getDailyLog.mockResolvedValue(null);
   (getVectorMemory as any).mockResolvedValue(null);
 });
 
