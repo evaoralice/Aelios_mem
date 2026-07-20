@@ -16,13 +16,13 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 
 **补充修复相关文件（第二轮）：**
 - `src/memory/dailyDigest.ts` — 补-P0 分批合并 + 补-P1 写入白名单 + 补-P1 重复 target 真正阻止
-- `src/utils/roleContext.ts` — 补-P1 Operit `<aelios_role_context>` 标记解析
-- `src/api/chatCompletions.ts` — 入口解析标记，覆盖 body 顶层 role_id/role_name 并剥离标记块
+- `src/utils/roleContext.ts` — 补-P1 Operit `<aelios_role_context>` 标记解析（`extractOperitRoleContext`）
+- `src/api/chatCompletions.ts` — 入口解析标记，顶层优先 + 缺字段才用标记 + 剥离标记消息替换 body.messages
 - `src/db/v2.ts` — `getDailyLog` 已存在，被 dailyDigest 新调用
 - `test/multirole/p0/batchDailyLogMerge.test.ts` — 补-P0 测试 5 项
 - `test/multirole/p0/dreamGroupWriteWhitelist.test.ts` — 补-P1 写入白名单测试 4 项
 - `test/multirole/p0/duplicateTargetConflict.test.ts` — 补-P1 重复 target 测试 5 项
-- `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析单元测试 16 项
+- `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析单元测试 20 项
 - `test/multirole/p1/operitRoleContextIntegration.test.ts` — 补-P1 chatCompletions 集成不变量源码扫描 8 项
 
 **前置条件：** Phase 1-5 缓存与记忆改造已完成（分支 `feat/cache-memory-tweak`）。
@@ -36,11 +36,14 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `7394c7e` — feat: multirole memory phases A-D
 - `c01cd1c` — feat: multirole memory phases E-H + code review fixes
 - `51ccfc7` — fix: self-review fixes + follow-up optimizations 1-7
-**本地未推送改动：** P0-2 自动提取关闭
+- `eeb4184` — feat: multirole memory P0/P1 fixes + behavior tests
+- `67835df` — feat: multirole memory round-2 fixes — batch merge, write whitelist, dup target block, Operit role tag
+- `1599ddb` — fix(roleContext): strict Operit role marker parsing per spec
 
 > **规则：不自动推送。等用户检查确认后再推送。**
 
-**验证状态：** typecheck ✅ / vitest 126/126 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
+**验证状态：** typecheck ✅ / vitest 207/207 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
+**本地验证命令：** `npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs`
 
 ---
 
@@ -70,9 +73,9 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 | 补-P0 | 同日分批日记被覆盖 | ✅ | 非首批读取已有 daily_log 喂入 prompt（角色组按 scope 分别读 + 非角色路径读 shared）；prompt 要求模型输出合并版完整 daily_log；baseline 仍按旧 baseline 继承规则，不因分批丢失 |
 | 补-P1 | Dream 输出角色组缺写入白名单 | ✅ | applyDreamV2 写 daily_log/baseline 时用 groupScopes 过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn |
 | 补-P1 | 重复 target 检测只 warn 不阻止 | ✅ | 改为两阶段：先统计每个 target_id 的 op 次数（update + delete 各算一次），只对 op 次数==1 的 target 执行；同 target 同时 update+delete 视为冲突，两个都不执行 |
-| 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` JSON 标记；仅识别 string content 独立 SYSTEM 消息；严格 JSON + 字段白名单 + ≤200 字符长度限制；多标记拒绝全部回退顶层；解析失败删标记 + warn；chatCompletions 入口"顶层优先，缺字段才用标记"，剥离后 body.messages 替换，下游全用清理后 messages |
+| 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` JSON 标记；仅识别 string content 独立 SYSTEM 消息；严格 JSON + 字段白名单(role_id/role_name) + ≤200 字符长度限制；多标记拒绝全部回退顶层；解析失败删标记 + warn；**残缺标记（闭合缺失）也删除 + warn 不转发上游**；chatCompletions 入口"顶层优先，缺字段才用标记"（`readString(body.role_id) ?? operitRole?.role_id`），剥离后 body.messages 替换，下游全用清理后 messages |
 
-### 待做 — 行为测试
+### 行为测试（12 项全部完成）
 
 清单要求 12 项端到端行为测试。**全部完成**：
 
@@ -166,9 +169,17 @@ test/
     phase6517/       — 10 tests
     phase23/         — 7 tests
     phase4/          — 4 tests
-    p0/              — 5 tests (P0-2 自动提取关闭)
+    p0/              — 10 tests (P0-2 自动提取关闭)
+      + dreamFlow.test.ts (10) / bootPackageScoping (4) / crossScopeDedup (6)
+      + boostPostRerankerStats (6) / pendingAndPrivateFields (6) / autoExtractDisabled (5)
+      + batchDailyLogMerge (5) / dreamGroupWriteWhitelist (4) / duplicateTargetConflict (5)
+    p1/              — 15 tests
+      + recallCrossScopeDedup (7) / operitRoleContextIntegration (8)
+  utils/
+    roleContext.test.ts — 20 tests (Operit 标记解析)
   phase1-4_5/        — 前一轮改造测试
 ```
+**当前总数：36 个测试文件，207 项测试全部通过**
 
 **运行命令：**
 ```bash
@@ -219,14 +230,12 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 ```bash
 cd /home/yyuan/projects/Aelios
 git checkout feat/multirole-memory
+git pull origin feat/multirole-memory
 npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs
 ```
 
-确认全绿后，按第三节"待做"顺序继续：
-1. 做梦流程组（P0-3 + P0-4 + P1-1 + P1-2 + P1-3）
-2. P1-6 召回去重
-3. P1-5 文档更新
-4. 行为测试
+确认全绿。**全部清单项已完成**（10 项 P0/P1 修复 + 12 项行为测试 + 4 项第二轮补充修复），无待做。
+下一步是部署（见第七节），部署前必须先备份远程 D1（0006 含 DROP TABLE + RENAME）。
 
 ---
 
@@ -244,6 +253,11 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 10. **pending changes 跨 provider** — text 模式 formatDynamicMemoryText，OpenAI formatPendingChangesText，toolcall 模式 buildSyntheticContext
 11. **pending 注入查 shared + 当前角色并集** — 不只查当前角色
 12. **做梦 groups 输出已解析** — normalizeDigestResult 解析 groups 并展平到 memories_to_update/delete
-13. **基线注入排序** — 当前实现读全部再排序（待改为只读当前角色）
-14. **token 超限自动拆分尚未实现** — 当前依赖 DREAM_MAX_ROLES_PER_RUN 限制
-15. **清单要求行为测试** — 不能只用源码正则检查代替端到端测试
+13. **基线注入只读当前角色** — buildBootPackage 只查 `getBaselines({roleScope})`，不读全部再排序
+14. **同日分批日记合并** — 非首批读取已有 daily_log 喂入 prompt，模型输出合并版完整 daily_log；baseline 仍按旧 baseline 继承规则
+15. **Dream 输出角色组写入白名单** — applyDreamV2 写 daily_log/baseline 时用 `groupScopes`（来自本次实际构建的 roleGroups）过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn
+16. **重复 target 真正阻止** — 两阶段检测：统计每个 target_id 的 op 次数（update+delete 各算一次），只对 op 次数==1 的 target 执行；同 target update+delete 视为冲突，两个都不执行
+17. **Operit 角色标记解析** — `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` 标记；顶层优先 + 缺字段才用标记；多标记拒绝全部回退顶层；残缺/解析失败/超长/未知字段一律删标记 + warn 不转发上游；标记不得出现在上游/数据库/dream/五轮历史/assembler/日志
+18. **token 超限自动拆分尚未实现** — 当前依赖 DREAM_MAX_ROLES_PER_RUN 限制
+19. **清单要求行为测试** — 不能只用源码正则检查代替端到端测试
+20. **wrangler d1 本地验证 migration** — 用临时 toml 指向本地 D1，真实执行 migration 验证 ALTER 顺序（见第三节末尾命令）
