@@ -22,7 +22,8 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `test/multirole/p0/batchDailyLogMerge.test.ts` — 补-P0 测试 5 项
 - `test/multirole/p0/dreamGroupWriteWhitelist.test.ts` — 补-P1 写入白名单测试 4 项
 - `test/multirole/p0/duplicateTargetConflict.test.ts` — 补-P1 重复 target 测试 5 项
-- `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析测试 10 项
+- `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析单元测试 16 项
+- `test/multirole/p1/operitRoleContextIntegration.test.ts` — 补-P1 chatCompletions 集成不变量源码扫描 8 项
 
 **前置条件：** Phase 1-5 缓存与记忆改造已完成（分支 `feat/cache-memory-tweak`）。
 
@@ -69,7 +70,7 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 | 补-P0 | 同日分批日记被覆盖 | ✅ | 非首批读取已有 daily_log 喂入 prompt（角色组按 scope 分别读 + 非角色路径读 shared）；prompt 要求模型输出合并版完整 daily_log；baseline 仍按旧 baseline 继承规则，不因分批丢失 |
 | 补-P1 | Dream 输出角色组缺写入白名单 | ✅ | applyDreamV2 写 daily_log/baseline 时用 groupScopes 过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn |
 | 补-P1 | 重复 target 检测只 warn 不阻止 | ✅ | 改为两阶段：先统计每个 target_id 的 op 次数（update + delete 各算一次），只对 op 次数==1 的 target 执行；同 target 同时 update+delete 视为冲突，两个都不执行 |
-| 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` 解析 `<aelios_role_context>` JSON 标记；chatCompletions 入口解析后覆盖 body 顶层 role_id/role_name 并从 messages 中剥离标记块（不转发上游）；system 优先于 user |
+| 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` JSON 标记；仅识别 string content 独立 SYSTEM 消息；严格 JSON + 字段白名单 + ≤200 字符长度限制；多标记拒绝全部回退顶层；解析失败删标记 + warn；chatCompletions 入口"顶层优先，缺字段才用标记"，剥离后 body.messages 替换，下游全用清理后 messages |
 
 ### 待做 — 行为测试
 
