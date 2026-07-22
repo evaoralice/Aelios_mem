@@ -5,9 +5,10 @@ import { saveAssistantMessage, saveUserMessages } from "../db/messages";
 import { saveUsageLog } from "../db/usageLogs";
 import { extractLastUserText } from "../memory/inject";
 import { assemble } from "../assembler/assemble";
+import type { PendingChange } from "../assembler/types";
 import { enqueueMemoryMaintenanceIfNeeded, enqueueRetentionIfNeeded } from "../queue/producer";
 import { buildBootPackage, isV2Enabled, runRecall } from "../memory/v2/recall";
-import { listPendingChangelog } from "../db/v2";
+import { listPendingChangelog, listPendingBaselineChangelog } from "../db/v2";
 import { computeRoleScope, isRoleMemoryEnabled } from "../utils/role";
 import {
   buildAnthropicRequestFromAssembled,
@@ -167,12 +168,27 @@ export async function handleChatCompletions(
       pendingRaw = sharedPending;
     }
   }
-  const pendingChanges = pendingRaw.map((c) => ({
+  const pendingChanges: PendingChange[] = pendingRaw.map((c) => ({
     op: c.op,
+    before_content: c.before_content,
     after_content: c.after_content,
     target_id: c.target_id,
     reason: c.reason,
   }));
+
+  // Baseline pending: 查当前角色的 baseline changelog，注入到对话中避免模型重复提交
+  if (isV2Enabled(env) && isRoleMemoryEnabled(env) && requestRoleScope !== "shared") {
+    const baselinePending = await listPendingBaselineChangelog(env.DB, { namespace, roleScope: requestRoleScope, limit: 10 });
+    for (const b of baselinePending) {
+      pendingChanges.push({
+        op: `baseline_${b.op}`,
+        before_content: b.before_content,
+        after_content: b.after_content,
+        target_id: null,
+        reason: b.reason,
+      });
+    }
+  }
 
   let upstream: Response;
   let clientSystemHash: string | null = null;

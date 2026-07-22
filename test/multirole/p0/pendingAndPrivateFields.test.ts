@@ -11,9 +11,9 @@ import { buildAnthropicRequestFromAssembled } from "../../../src/proxy/anthropic
 import { createMockEnv } from "../../helpers/d1-mock";
 
 const pendingChanges: PendingChange[] = [
-  { op: "add", after_content: "用户喜欢用 Vim 写代码", target_id: null, reason: null },
-  { op: "update", after_content: "用户改为早上 7 点起床", target_id: "mem_x1", reason: "作息更新" },
-  { op: "delete", after_content: null, target_id: "mem_y2", reason: "重复" },
+  { op: "add", before_content: null, after_content: "用户喜欢用 Vim 写代码", target_id: null, reason: null },
+  { op: "update", before_content: "用户起床时间不定", after_content: "用户改为早上 7 点起床", target_id: "mem_x1", reason: "作息更新" },
+  { op: "delete", before_content: "用户住北京", after_content: null, target_id: "mem_y2", reason: "重复" },
 ];
 
 function makeAssembled(overrides: any = {}): AssembledPrompt {

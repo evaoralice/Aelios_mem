@@ -1270,3 +1270,114 @@ export async function markChangelogConflict(
     .bind(input.errorMessage, input.id)
     .run();
 }
+
+// =====================================================================
+// baseline_changelog — baseline pending 机制
+// 模型对话中提交角色长期印象的增删改，做梦时统一合并应用。
+// 独立于 memory_changelog（原子记忆 pending）。
+// =====================================================================
+
+export interface BaselineChangelogRow {
+  id: string;
+  namespace: string;
+  role_scope: string;
+  op: "add" | "update" | "delete";
+  before_content: string | null;
+  after_content: string | null;
+  reason: string;
+  role_id: string | null;
+  role_name: string | null;
+  created_at: string;
+  status: "pending" | "applied" | "conflict";
+  error_message: string | null;
+  applied_at: string | null;
+}
+
+export async function createBaselineChangelogEntry(
+  db: D1Database,
+  input: {
+    namespace: string;
+    roleScope: string;
+    op: "add" | "update" | "delete";
+    beforeContent?: string | null;
+    afterContent?: string | null;
+    reason: string;
+    roleId: string;
+    roleName?: string | null;
+  }
+): Promise<BaselineChangelogRow> {
+  const id = newId("bch");
+  const now = nowIso();
+  await db
+    .prepare(
+      `INSERT INTO baseline_changelog (
+        id, namespace, role_scope, op, before_content, after_content,
+        reason, role_id, role_name, created_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+    )
+    .bind(
+      id,
+      input.namespace,
+      input.roleScope,
+      input.op,
+      input.beforeContent ?? null,
+      input.afterContent ?? null,
+      input.reason,
+      input.roleId,
+      input.roleName ?? null,
+      now
+    )
+    .run();
+  return {
+    id,
+    namespace: input.namespace,
+    role_scope: input.roleScope,
+    op: input.op,
+    before_content: input.beforeContent ?? null,
+    after_content: input.afterContent ?? null,
+    reason: input.reason,
+    role_id: input.roleId,
+    role_name: input.roleName ?? null,
+    created_at: now,
+    status: "pending",
+    error_message: null,
+    applied_at: null,
+  };
+}
+
+export async function listPendingBaselineChangelog(
+  db: D1Database,
+  input: { namespace: string; roleScope?: string; limit?: number }
+): Promise<BaselineChangelogRow[]> {
+  const limit = input.limit ?? 50;
+  let sql = `SELECT * FROM baseline_changelog WHERE namespace = ? AND status = 'pending'`;
+  const binds: unknown[] = [input.namespace];
+  if (input.roleScope) {
+    sql += ` AND role_scope = ?`;
+    binds.push(input.roleScope);
+  }
+  sql += ` ORDER BY created_at ASC LIMIT ?`;
+  binds.push(limit);
+  const result = await db.prepare(sql).bind(...binds).all<BaselineChangelogRow>();
+  return result.results ?? [];
+}
+
+export async function markBaselineChangelogApplied(
+  db: D1Database,
+  input: { id: string }
+): Promise<void> {
+  await db
+    .prepare("UPDATE baseline_changelog SET status = 'applied', applied_at = ? WHERE id = ?")
+    .bind(nowIso(), input.id)
+    .run();
+}
+
+export async function markBaselineChangelogConflict(
+  db: D1Database,
+  input: { id: string; errorMessage: string }
+): Promise<void> {
+  await db
+    .prepare("UPDATE baseline_changelog SET status = 'conflict', error_message = ? WHERE id = ?")
+    .bind(input.errorMessage, input.id)
+    .run();
+}

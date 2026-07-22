@@ -170,11 +170,10 @@ describe("P1 Dream 输出角色组写入白名单校验", () => {
     expect(result.ran).toBe(true);
 
     const aliceDailyWrites = upsertDailyLog.mock.calls.filter((c: any) => c[1].roleScope === "id:alice");
-    const aliceBaselineWrites = upsertBaseline.mock.calls.filter((c: any) => c[1].roleScope === "id:alice");
     expect(aliceDailyWrites.length).toBe(1);
-    expect(aliceBaselineWrites.length).toBe(1);
     expect((aliceDailyWrites[0] as any)[1].summary).toContain("第一版要点");
-    expect((aliceBaselineWrites[0] as any)[1].content).toContain("Alice 基线1");
+    // baseline 不再由做梦写入
+    expect(upsertBaseline).not.toHaveBeenCalled();
   });
 
   it("模型漏掉 Alice：不得清空 Alice 原有日记或 baseline", async () => {

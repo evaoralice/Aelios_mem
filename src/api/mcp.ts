@@ -6,6 +6,7 @@ import {
   archiveMemory,
   createPrecious,
   createChangelogEntry,
+  createBaselineChangelogEntry,
   deleteMemoryV2,
   fetchMemoryLifecycleRows,
   getDigest,
@@ -30,6 +31,7 @@ import {
 import { enqueueMemoryMaintenanceIfNeeded } from "../queue/producer";
 import type { Env, KeyProfile, Scope } from "../types";
 import { json } from "../utils/json";
+import { computeRoleScope } from "../utils/role";
 import {
   isRecord,
   readBoolean,
@@ -293,59 +295,98 @@ function getTools(): Array<Record<string, unknown>> {
         required: ["fact_key", "content"]
       }
     },
+    // --- 原子记忆 pending 工具（已屏蔽）---
+    // 保留 handler 代码（见下方 callTool），但从 tools 列表移除，模型看不到。
+    // 原因：当前采用 MCP 主动维护原子记忆（memory_upsert 实时写），
+    // 原子记忆 pending 容易产生低价值/重复记忆，不再暴露给模型。
+    // 如需恢复，取消下方三个工具的注释即可。
+    //
+    // {
+    //   name: "memory_change_add",
+    //   description:
+    //     "提交新增记忆的变更日志（pending）。凌晨做梦时由代码应用。白天不直接写 memories。" +
+    //     "role_id/role_name 使用规则：记录角色特征/偏好/设定 → 传；记录用户通用信息 → 不传。",
+    //   inputSchema: {
+    //     type: "object",
+    //     properties: {
+    //       content: { type: "string" },
+    //       type: {
+    //         type: "string",
+    //         description: "Memory type. One of: fact, event, preference, relationship, boundary, habit, decision, note, world_fact.",
+    //       },
+    //       importance: { type: "number" },
+    //       role_id: {
+    //         type: "string",
+    //         description: "记录角色自己的特征/偏好/设定/关系时传 role_id；记录用户通用信息时不传。不要把从记忆召回中读到的信息重新写入。",
+    //       },
+    //       role_name: { type: "string" },
+    //       reason: { type: "string" }
+    //     },
+    //     required: ["content"]
+    //   }
+    // },
+    // {
+    //   name: "memory_change_update",
+    //   description:
+    //     "提交修改记忆的变更日志（pending）。凌晨做梦时由代码应用。" +
+    //     "需要目标记忆的 target_id。归属从目标记忆继承，不接受 role_id/role_name 参数。",
+    //   inputSchema: {
+    //     type: "object",
+    //     properties: {
+    //       target_id: { type: "string" },
+    //       content: { type: "string" },
+    //       type: { type: "string" },
+    //       importance: { type: "number" },
+    //       reason: { type: "string" }
+    //     },
+    //     required: ["target_id", "content"]
+    //   }
+    // },
+    // {
+    //   name: "memory_change_delete",
+    //   description:
+    //     "提交删除记忆的变更日志（pending）。凌晨做梦时由代码应用。归属从目标记忆继承。",
+    //   inputSchema: {
+    //     type: "object",
+    //     properties: {
+    //       target_id: { type: "string" },
+    //       reason: { type: "string" }
+    //     },
+    //     required: ["target_id"]
+    //   }
+    // },
     {
-      name: "memory_change_add",
+      name: "baseline_change",
       description:
-        "提交新增记忆的变更日志（pending）。凌晨做梦时由代码应用。白天不直接写 memories。" +
-        "role_id/role_name 使用规则：记录角色特征/偏好/设定 → 传；记录用户通用信息 → 不传。",
+        "提交角色长期印象（baseline）的增删改（pending）。凌晨做梦时统一合并应用。" +
+        "不影响当前缓存里的 baseline。用于小幅度更新角色对用户的长期认知。",
       inputSchema: {
         type: "object",
         properties: {
-          content: { type: "string" },
-          type: { 
+          op: {
             type: "string",
-            description: "Memory type. One of: fact, event, preference, relationship, boundary, habit, decision, note, world_fact.",
+            description: "add | update | delete。add=新增印象，update=修改已有印象，delete=删除过时印象。",
           },
-          importance: { type: "number" },
-          role_id: { 
+          before_content: {
             type: "string",
-            description: "记录角色自己的特征/偏好/设定/关系时传 role_id；记录用户通用信息时不传。不要把从记忆召回中读到的信息重新写入。",
+            description: "要修改/删除的原文片段（update 和 delete 时必填，add 时不传）。",
+          },
+          after_content: {
+            type: "string",
+            description: "修改后的文本（add 和 update 时必填，delete 时不传）。",
+          },
+          reason: {
+            type: "string",
+            description: "为什么要改（必填）。",
+          },
+          role_id: {
+            type: "string",
+            description: "角色 ID（必填，baseline 是角色专属，不支持 shared）。",
           },
           role_name: { type: "string" },
-          reason: { type: "string" }
         },
-        required: ["content"]
-      }
-    },
-    {
-      name: "memory_change_update",
-      description:
-        "提交修改记忆的变更日志（pending）。凌晨做梦时由代码应用。" +
-        "需要目标记忆的 target_id。归属从目标记忆继承，不接受 role_id/role_name 参数。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          target_id: { type: "string" },
-          content: { type: "string" },
-          type: { type: "string" },
-          importance: { type: "number" },
-          reason: { type: "string" }
-        },
-        required: ["target_id", "content"]
-      }
-    },
-    {
-      name: "memory_change_delete",
-      description:
-        "提交删除记忆的变更日志（pending）。凌晨做梦时由代码应用。归属从目标记忆继承。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          target_id: { type: "string" },
-          reason: { type: "string" }
-        },
-        required: ["target_id"]
-      }
+        required: ["op", "reason", "role_id"],
+      },
     },
     {
       name: "memory_supersede",
@@ -747,6 +788,38 @@ export async function callTool(
       payloadJson: JSON.stringify({}),
       reason: readString(args.reason) ?? null,
       // Role is NOT accepted — inherited from target at apply time
+    });
+    return textToolResult({ data: row });
+  }
+
+  if (params.name === "baseline_change") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const op = readString(args.op);
+    const reason = readString(args.reason);
+    const roleId = readString(args.role_id);
+    const roleName = readString(args.role_name) ?? null;
+    // 校验
+    if (!op || !["add", "update", "delete"].includes(op)) {
+      return toolError("op must be add, update, or delete");
+    }
+    if (!reason) return toolError("reason is required");
+    if (!roleId) return toolError("role_id is required (baseline is role-specific, shared baseline is not allowed)");
+    const beforeContent = readString(args.before_content) ?? null;
+    const afterContent = readString(args.after_content) ?? null;
+    if (op === "add" && !afterContent) return toolError("add requires after_content");
+    if (op === "update" && (!beforeContent || !afterContent)) return toolError("update requires before_content and after_content");
+    if (op === "delete" && !beforeContent) return toolError("delete requires before_content");
+    const roleScope = computeRoleScope(roleId, roleName);
+    if (roleScope === "shared") return toolError("shared baseline is not allowed; role_id is required");
+    const row = await createBaselineChangelogEntry(env.DB, {
+      namespace: resolveNamespace(profile, args.namespace),
+      roleScope,
+      op: op as "add" | "update" | "delete",
+      beforeContent,
+      afterContent,
+      reason,
+      roleId,
+      roleName,
     });
     return textToolResult({ data: row });
   }

@@ -26,6 +26,9 @@ import {
   listPendingChangelog,
   markChangelogApplied,
   markChangelogConflict,
+  listPendingBaselineChangelog,
+  markBaselineChangelogApplied,
+  markBaselineChangelogConflict,
   getBaselines,
   getDailyLog,
   DIGEST_MAX_CHARS
@@ -525,7 +528,7 @@ function buildDigestPrompt(input: {
   existingMemories: MemoryApiRecord[];
   excerptLimit: number;
   hasMore: boolean;
-  roleGroups?: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
+  roleGroups?: Array<{ role_scope: string; role_name: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }>;
   existingSharedDailyLog?: { title: string; summary: string } | null;
 }): string {
   const hasRoleGroups = input.roleGroups && input.roleGroups.length > 0;
@@ -567,11 +570,10 @@ function buildDigestPrompt(input: {
       "- 当天可能被分批整理。如果某角色组提供了「已有当日日记」，说明本批不是首批。",
       "- 你必须把已有日记的内容融合进本批新消息，输出该角色当天的合并版完整 daily_log，而不是只总结本批。",
       "- 不要丢失前批已记录的要点；如果前批要点已被后续证据修正，可在 summary 中体现，但不要凭空删掉。",
-      "- baseline 仍按旧 baseline 继承规则生成，不因分批而丢失。",
+      "- baseline 不由做梦生成，忽略 baseline 字段。",
       "",
       "每个角色组必须输出：",
       "- daily_log：该角色视角的当日标题和分条列点 summary（每条一行「- 」开头，整体 ≤800 字），写当天互动要点，不写流水账。若已有日记存在，输出合并后的完整版。",
-      "- baseline：该角色对用户的长期印象（不是当天流水账）。要求：写角色如何理解用户、关系状态、相处经验与长期应对方式；忠实继承旧 baseline 中未被新证据推翻的部分；不把一次性安排写成永久印象；不混入其他角色视角；若旧 baseline 为空就基于当天素材生成首版。",
       "- memories_to_update / memories_to_delete：仅限同 role_scope 的 target_id。",
       "",
       "输出 JSON 结构（多角色分组）：",
@@ -579,7 +581,6 @@ function buildDigestPrompt(input: {
         groups: input.roleGroups!.map((g) => ({
           role_scope: g.role_scope,
           daily_log: { title: "当天标题", summary: "- 互动要点1\n- 互动要点2" },
-          baseline: "该角色对用户的长期印象（继承旧 baseline，融合当天新证据）",
           memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8 }],
           memories_to_delete: [{ target_id: "mem_y", reason: "重复" }],
         })),
@@ -637,7 +638,6 @@ function buildDigestPrompt(input: {
       ? input.roleGroups!.map((g) =>
           [
             `=== [${g.role_scope === "shared" ? "共享" : g.role_name ?? g.role_scope}] ===`,
-            g.oldBaseline ? `旧 baseline（请忠实继承，仅在有新证据时更新）：\n${g.oldBaseline}` : "（无旧 baseline，基于当天素材生成首版）",
             g.existingDailyLog
               ? `已有当日日记（本批不是首批，请合并输出完整版）：\n  标题：${g.existingDailyLog.title}\n  摘要：${g.existingDailyLog.summary}`
               : "（本批是首批，基于本批素材生成首版日记）",
@@ -940,6 +940,139 @@ async function applyPendingChanges(
   return { applied, conflicts };
 }
 
+// =====================================================================
+// applyBaselineChanges — 合并 baseline pending 到 long_term_baselines
+// 每晚每个有 pending 的角色只调一次模型合并，不随消息分批重复。
+// 没有 pending 就不调模型。生成+写入都成功才标记 applied。
+// =====================================================================
+
+async function applyBaselineChanges(
+  env: Env,
+  namespace: string
+): Promise<{ applied: number; conflicts: number; model_calls: number }> {
+  let applied = 0;
+  let conflicts = 0;
+  let modelCalls = 0;
+
+  // 查所有 pending baseline changelog（所有 role_scope）
+  const pending = await listPendingBaselineChangelog(env.DB, { namespace, limit: 100 });
+  if (pending.length === 0) return { applied, conflicts, model_calls: modelCalls };
+
+  // 按 role_scope 分组
+  const byScope = new Map<string, typeof pending>();
+  for (const entry of pending) {
+    if (!byScope.has(entry.role_scope)) byScope.set(entry.role_scope, []);
+    byScope.get(entry.role_scope)!.push(entry);
+  }
+
+  const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
+
+  for (const [scope, entries] of byScope) {
+    // 读旧 baseline
+    let oldBaseline = "";
+    try {
+      const baselineRows = await getBaselines(env.DB, { namespace, roleScope: scope });
+      oldBaseline = baselineRows[0]?.content ?? "";
+    } catch (error) {
+      console.warn(`baseline pending: failed to read old baseline for ${scope}`, error);
+      // 读旧 baseline 失败不影响合并，空字符串即可
+    }
+
+    // 构造合并 prompt
+    const changeLines: string[] = [];
+    for (const entry of entries) {
+      const before = entry.before_content ? `原文：${entry.before_content}` : "";
+      const after = entry.after_content ? `修改后：${entry.after_content}` : "";
+      const parts = [`[${entry.op}]`, before, after].filter(Boolean);
+      changeLines.push(`${parts.join("，")}。理由：${entry.reason}`);
+    }
+
+    const prompt = [
+      "你是 baseline 合并器。以下是某角色的旧 baseline 和用户在对话中提交的修改请求。",
+      "请合并成新的完整 baseline 文本。",
+      "- add：在合适位置追加新内容",
+      "- update：用修改后文本替换原文描述的意思",
+      "- delete：移除原文描述的内容",
+      "- 保留未被修改的部分",
+      "- 不写流水账，只写长期印象",
+      `- 输出 ≤${maxPerRole} 字符`,
+      "",
+      `旧 baseline：`,
+      oldBaseline || "（空）",
+      "",
+      "修改请求：",
+      ...changeLines,
+      "",
+      "输出新 baseline 文本（只输出正文，不要 JSON，不要解释）：",
+    ].join("\n");
+
+    // 调模型
+    const model = readDreamModel(env);
+    if (!model) {
+      console.error("baseline pending: missing dream model");
+      for (const entry of entries) {
+        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "missing model" });
+        conflicts++;
+      }
+      continue;
+    }
+
+    let newBaseline: string | null = null;
+    try {
+      modelCalls++;
+      const request: OpenAIChatRequest = {
+        model,
+        messages: [
+          { role: "system", content: "你是严格的文本生成器。只输出合并后的 baseline 正文，不要 JSON，不要解释，不要思考过程。" },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0,
+        max_tokens: 2000,
+        stream: false,
+      };
+      const response = await callOpenAICompat(env, request);
+      const data = (await response.json()) as OpenAIChatResponse;
+      const rawContent = data.choices?.[0]?.message?.content;
+      newBaseline = typeof rawContent === "string" ? rawContent.trim() : null;
+    } catch (error) {
+      console.error(`baseline pending: model call failed for ${scope}`, error);
+      for (const entry of entries) {
+        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "model call failed" });
+        conflicts++;
+      }
+      continue;
+    }
+
+    if (!newBaseline || !newBaseline.trim()) {
+      console.warn(`baseline pending: model returned empty for ${scope}`);
+      for (const entry of entries) {
+        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "model returned empty" });
+        conflicts++;
+      }
+      continue;
+    }
+
+    // 写入 baseline
+    try {
+      const truncated = newBaseline.slice(0, maxPerRole);
+      await upsertBaseline(env.DB, { namespace, roleScope: scope, content: truncated });
+      // 标记所有 pending 为 applied（不删，保留原文供审查）
+      for (const entry of entries) {
+        await markBaselineChangelogApplied(env.DB, { id: entry.id });
+        applied++;
+      }
+    } catch (error) {
+      console.error(`baseline pending: write failed for ${scope}`, error);
+      for (const entry of entries) {
+        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "write failed" });
+        conflicts++;
+      }
+    }
+  }
+
+  return { applied, conflicts, model_calls: modelCalls };
+}
+
 async function applyDreamV2(
   env: Env,
   input: {
@@ -1135,16 +1268,7 @@ async function applyDreamV2(
           roleScope: scope,
         });
       }
-      // P1-1: write per-role baseline
-      if (group.baseline && typeof group.baseline === "string" && group.baseline.trim()) {
-        const truncated = group.baseline.slice(0, maxPerRole);
-        if (totalBaselineChars + truncated.length > maxTotal) {
-          console.warn(`dream: baseline for ${scope} skipped (total cap ${maxTotal} exceeded)`);
-          continue;
-        }
-        totalBaselineChars += truncated.length;
-        await upsertBaseline(env.DB, { namespace, roleScope: scope, content: truncated });
-      }
+      // baseline 不再由做梦自动生成/更新 — 只能通过 baseline_change pending 修改
     }
   } else if (!digest.groups && digest.summary) {
     // Non-role path: write shared daily_log (legacy behavior)
@@ -1157,28 +1281,7 @@ async function applyDreamV2(
     });
   }
 
-  // Legacy baseline_texts support (non-groups path)
-  const baselineTexts = roleEnabled ? digest.baseline_texts : undefined;
-  if (baselineTexts && !digest.groups) {
-    const maxPerRole = Number(env.BASELINE_MAX_CHARS_PER_ROLE ?? "2000");
-    const maxTotal = Number(env.BASELINE_MAX_CHARS_TOTAL ?? "8000");
-    let totalChars = 0;
-    const sortedEntries = Object.entries(baselineTexts).sort(([a], [b]) => {
-      if (a === "shared") return -1;
-      if (b === "shared") return 1;
-      return a.localeCompare(b);
-    });
-    for (const [roleScope, content] of sortedEntries) {
-      if (typeof content !== "string" || !content.trim()) continue;
-      const truncated = content.slice(0, maxPerRole);
-      if (totalChars + truncated.length > maxTotal) {
-        console.warn(`dream: baseline for ${roleScope} skipped (total cap ${maxTotal} exceeded)`);
-        continue;
-      }
-      totalChars += truncated.length;
-      await upsertBaseline(env.DB, { namespace, roleScope, content: truncated });
-    }
-  }
+  // baseline 不再由做梦自动生成 — legacy baseline_texts 路径已移除
 
   return { added, updated, deleted, excerpts, longtail: longtailCount };
 }
@@ -1228,6 +1331,11 @@ export async function runDailyMemoryDigest(
     if (pendingResult.applied > 0 || pendingResult.conflicts > 0) {
       console.log("dream: applied pending changes before reading memories", pendingResult);
     }
+    // Baseline pending: 独立于原子记忆 pending, 每晚每个有 pending 的角色只合并一次。
+    const baselineResult = await applyBaselineChanges(env, namespace);
+    if (baselineResult.applied > 0 || baselineResult.conflicts > 0 || baselineResult.model_calls > 0) {
+      console.log("dream: applied baseline changes", baselineResult);
+    }
   }
 
   let existingMemories: MemoryApiRecord[] = [];
@@ -1253,7 +1361,7 @@ export async function runDailyMemoryDigest(
 
   // P0-4: Group messages by computeRoleScope (not by raw role_id), and trigger grouping
   // whenever at least one non-shared role exists (no longer requires size > 1).
-  let roleGroups: Array<{ role_scope: string; role_name: string | null; oldBaseline: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
+  let roleGroups: Array<{ role_scope: string; role_name: string | null; existingDailyLog: { title: string; summary: string } | null; messages: MessageRecord[]; memories: MemoryApiRecord[] }> | undefined;
   if (roleEnabled) {
     // Group messages by computeRoleScope
     const messagesByScope = new Map<string, MessageRecord[]>();
@@ -1289,14 +1397,6 @@ export async function runDailyMemoryDigest(
         const roleMemories = existingMemories.filter(
           (m) => m.role_scope === scope || m.role_scope === "shared"
         );
-        // Fetch old baseline for this scope to feed the prompt (P1-1)
-        let oldBaseline: string | null = null;
-        try {
-          const baselineRows = await getBaselines(env.DB, { namespace, roleScope: scope });
-          oldBaseline = baselineRows[0]?.content ?? null;
-        } catch (error) {
-          console.warn(`dream: failed to read baseline for ${scope}`, error);
-        }
         // P0: 分批合并 — 读取该角色当天已有 daily_log，喂给模型做合并
         let existingDailyLog: { title: string; summary: string } | null = null;
         try {
@@ -1310,7 +1410,6 @@ export async function runDailyMemoryDigest(
         roleGroups.push({
           role_scope: scope,
           role_name: roleName,
-          oldBaseline,
           existingDailyLog,
           messages: roleMsgs,
           memories: roleMemories,

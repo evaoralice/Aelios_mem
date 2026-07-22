@@ -301,10 +301,10 @@ describe("P1-1 / P1-3: per-role daily_log and baseline written", () => {
     expect(dailyLogScopes).toContain("id:alice");
     expect(dailyLogScopes).toContain("id:bob");
 
-    // Verify two baseline writes with distinct role_scopes
+    // baseline 不再由做梦写入 — 只能通过 baseline_change pending 修改
     const baselineScopes = upsertBaseline.mock.calls.map((c: any[]) => c[1]?.roleScope).filter(Boolean);
-    expect(baselineScopes).toContain("id:alice");
-    expect(baselineScopes).toContain("id:bob");
+    expect(baselineScopes).not.toContain("id:alice");
+    expect(baselineScopes).not.toContain("id:bob");
 
     // Alice's daily_log should not contain Bob's content
     const aliceLog = upsertDailyLog.mock.calls.find((c: any[]) => c[1]?.roleScope === "id:alice");
@@ -338,7 +338,8 @@ describe("P1-1 / P1-3: per-role daily_log and baseline written", () => {
     const result = await runDailyMemoryDigest(env, "ns", { dateLabel: "2025-07-18", force: true });
     expect(result.ran).toBe(true);
     expect(upsertDailyLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ roleScope: "id:alice" }));
-    expect(upsertBaseline).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ roleScope: "id:alice" }));
+    // baseline 不再由做梦写入 — 只能通过 baseline_change pending 修改
+    expect(upsertBaseline).not.toHaveBeenCalled();
   });
 });
 
@@ -370,15 +371,16 @@ describe("P1-2: buildBootPackage only fetches current role baseline (source-leve
 });
 
 describe("P1-1: baseline prompt explicitly asks for long-term impression", () => {
-  it("buildDigestPrompt role-group section includes baseline guidance", () => {
-    // Source-level check that prompt explicitly instructs baseline = long-term impression
+  it("dream prompt does not ask for baseline output (baseline only via pending)", () => {
+    // Source-level check that dream prompt no longer asks for baseline generation
     const src = require("fs").readFileSync(
       require("path").resolve(__dirname, "../../../src/memory/dailyDigest.ts"),
       "utf-8"
     );
-    // The prompt should mention "长期印象" / "忠实继承" / "不把一次性安排写成永久"
-    expect(src).toMatch(/长期印象/);
-    expect(src).toMatch(/忠实继承/);
-    expect(src).toMatch(/一次性安排/);
+    // baseline 不由做梦生成，prompt 应明确标注忽略 baseline
+    expect(src).toMatch(/baseline 不由做梦生成/);
+    expect(src).toMatch(/忽略 baseline 字段/);
+    // 不再要求模型输出 baseline
+    expect(src).not.toMatch(/忠实继承旧 baseline/);
   });
 });

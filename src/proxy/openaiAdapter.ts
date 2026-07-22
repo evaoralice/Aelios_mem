@@ -18,9 +18,21 @@ function formatPendingChangesText(pendingChanges?: PendingChange[]): string | nu
   if (!pendingChanges || pendingChanges.length === 0) return null;
   const lines = ["=== 待处理变更（今日）==="];
   for (const c of pendingChanges) {
-    const desc = c.op === "delete"
-      ? `删除记忆 ${c.target_id}`
-      : `${c.op === "add" ? "新增" : "修改"} ${c.after_content ?? ""}`;
+    const isBaseline = c.op.startsWith("baseline_");
+    const opVerb = isBaseline ? c.op.replace("baseline_", "") : c.op;
+    const tag = isBaseline ? "[baseline] " : "";
+    let desc: string;
+    if (opVerb === "delete") {
+      desc = isBaseline
+        ? `${tag}删除：${c.before_content ?? ""}`
+        : `删除记忆 ${c.target_id}`;
+    } else if (opVerb === "add") {
+      desc = `${tag}新增：${c.after_content ?? ""}`;
+    } else {
+      // update
+      desc = `${tag}修改：${c.before_content ?? ""} → ${c.after_content ?? ""}`;
+    }
+    if (c.reason) desc += `（理由：${c.reason}）`;
     lines.push(desc);
   }
   return lines.join("\n");

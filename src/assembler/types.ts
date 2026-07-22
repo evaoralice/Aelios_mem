@@ -115,6 +115,7 @@ export interface SyntheticContext {
 
 export interface PendingChange {
   op: string;
+  before_content: string | null;
   after_content: string | null;
   target_id: string | null;
   reason: string | null;
