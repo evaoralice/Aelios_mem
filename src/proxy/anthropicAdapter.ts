@@ -612,12 +612,15 @@ export async function buildAnthropicNativeRequest(
 //   2. system (persona_pinned): cache_control on persona_pinned block.
 //      This is the most stable content. boot_stable (glossary, digest)
 //      is OUTSIDE the cache prefix — it changes daily.
-//   3. bridge (message): for long conversations (>16 message blocks),
-//      a mid-history anchor so the tail's 20-block lookback doesn't
-//      lose older cached prefix.
+//   3. boot_stable (system): digest + recent_logs + glossary — stable within a day.
 //   4. tail (message): last stable block before dynamic content.
 //      Default mode A: last block of the message before current_user.
 //      Opt-in mode B: first text block of current_user.
+//
+// 不设中间 bridge 断点（占用 breakpoint 计数）。
+// 设计原因：tail 断点失效时 Anthropic 会自动向上查找最近的 cache entry
+// （breakpoint 3 boot_stable），不需要中间断点也能命中长期记忆缓存。
+// bridge 省下的计数让给 tail 更有价值。
 //
 // Dynamic content (dynamic_memory_patch, time reminders, current user
 // memories) is appended AFTER all breakpoints — never cached.

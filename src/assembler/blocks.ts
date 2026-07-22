@@ -500,6 +500,11 @@ export function assemble(ctx: AssemblerContext): AssembledPrompt {
   //   Mode A (default): last block of the message before current_user.
   //   Mode B: first text block of current_user (opt-in).
   //
+  // 不设中间 bridge 断点（占用 breakpoint 计数）。
+  // 设计原因：tail 断点失效（最近对话找不到匹配前缀）说明历史已压缩或滚动窗口，
+  // 此时 Anthropic 会自动向上查找最近的 cache entry（breakpoint 3 boot_stable），
+  // 不需要中间断点也能命中长期记忆缓存。bridge 省下的计数让给 tail 更有价值。
+  //
   // Dynamic content (memories, time reminders) is appended AFTER all
   // breakpoints and never gets cache_control.
   const breakpoints: CacheBreakpoint[] = [];
