@@ -25,6 +25,16 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `test/utils/roleContext.test.ts` — 补-P1 Operit 标记解析单元测试 20 项
 - `test/multirole/p1/operitRoleContextIntegration.test.ts` — 补-P1 chatCompletions 集成不变量源码扫描 8 项
 
+**Baseline pending 机制相关文件（第三轮）：**
+- `migrations/0007_baseline_changelog.sql` — 新建 baseline_changelog 表（独立于 memory_changelog）
+- `src/db/v2.ts` — 5 个 CRUD：create / listPending / markApplied / markConflict / markError
+- `src/api/mcp.ts` — 新增 `baseline_change` 工具 + 7 条校验；注释掉 `memory_change_add/update/delete`
+- `src/memory/dailyDigest.ts` — 去掉做梦 baseline 自动生成（prompt + 写入）；新增 `applyBaselineChanges`（按 scope 分组合并）
+- `src/assembler/types.ts` — `PendingChange` 加 `before_content`
+- `src/api/chatCompletions.ts` — 查 `baseline_changelog` 拼入 pending 注入（op 加 `baseline_` 前缀）
+- `src/proxy/openaiAdapter.ts` + `anthropicAdapter.ts` — pending 注入格式加 before + reason + `[baseline]` 标签
+- `test/multirole/p0/baselinePending.test.ts` — 7 项测试
+
 **前置条件：** Phase 1-5 缓存与记忆改造已完成（分支 `feat/cache-memory-tweak`）。
 
 ---
@@ -39,10 +49,16 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `eeb4184` — feat: multirole memory P0/P1 fixes + behavior tests
 - `67835df` — feat: multirole memory round-2 fixes — batch merge, write whitelist, dup target block, Operit role tag
 - `1599ddb` — fix(roleContext): strict Operit role marker parsing per spec
+- `8bbd5e1` — docs: add multirole memory design rationale + future-dev tracking notes
+- `1f98405` — docs: add pending issues tracker
+- `fb03785` — docs: annotate bridge breakpoint design decision
+- `fb03627` — feat: baseline pending mechanism — model-submitted baseline changes via MCP
+- `1612db0` — fix: baseline pending error handling — keep pending on transient failures, skip on read failure
+- `7b9f146` — fix: clear error_message when marking baseline changelog applied
 
 > **规则：不自动推送。等用户检查确认后再推送。**
 
-**验证状态：** typecheck ✅ / vitest 207/207 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
+**验证状态：** typecheck ✅ / vitest 214/214 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
 **本地验证命令：** `npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs`
 
 ---
@@ -59,7 +75,7 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 | P0-2 | 彻底关闭自动提取 | ✅ | index.ts gate + extractPipeline 二次保护，返回 `auto_memory_disabled` |
 | P0-3 | 做梦前应用 pending | ✅ | applyPendingChanges 前移到读记忆/prompt 之前；模型看到刚应用的变更 |
 | P0-4 | 角色做梦分组 | ✅ | 按 computeRoleScope 分组；单一非 shared 角色也触发；超限失败不推进 cursor；跨 scope 修改被校验拦截 |
-| P1-1 | baseline 语义 | ✅ | prompt 明确"角色对用户的长期印象、忠实继承、不复制流水账"；每个 group 独立输出 baseline |
+| P1-1 | baseline 语义 | ✅ | ~~prompt 明确"角色对用户的长期印象"~~ → **第三轮改为 baseline 不再由做梦生成，只通过 `baseline_change` pending 修改** |
 | P1-2 | 只注入当前角色 baseline | ✅ | buildBootPackage 只查当前 role_scope baseline；daily_log 同样只查当前 scope |
 | P1-3 | 日记写入/读取 | ✅ | applyDreamV2 按 group 分别 upsertDailyLog/upsertBaseline；请求只读当前角色最近两天 |
 | P1-4 | boost 后置 | ✅ | 去掉 pre-boost，只在 reranker 后应用完整 boost |
@@ -74,6 +90,31 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 | 补-P1 | Dream 输出角色组缺写入白名单 | ✅ | applyDreamV2 写 daily_log/baseline 时用 groupScopes 过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn |
 | 补-P1 | 重复 target 检测只 warn 不阻止 | ✅ | 改为两阶段：先统计每个 target_id 的 op 次数（update + delete 各算一次），只对 op 次数==1 的 target 执行；同 target 同时 update+delete 视为冲突，两个都不执行 |
 | 补-P1 | Operit 角色身份标记解析 | ✅ | 新增 `src/utils/roleContext.ts` `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` JSON 标记；仅识别 string content 独立 SYSTEM 消息；严格 JSON + 字段白名单(role_id/role_name) + ≤200 字符长度限制；多标记拒绝全部回退顶层；解析失败删标记 + warn；**残缺标记（闭合缺失）也删除 + warn 不转发上游**；chatCompletions 入口"顶层优先，缺字段才用标记"（`readString(body.role_id) ?? operitRole?.role_id`），剥离后 body.messages 替换，下游全用清理后 messages |
+
+### Baseline pending 机制（第三轮）
+
+**核心变更：** baseline 不再由做梦自动生成/更新，改为模型对话中通过 MCP `baseline_change` 提交 pending，做梦时统一合并应用。
+
+| 最终规则 | 实现 |
+|---|---|
+| 1. baseline 只能由 `baseline_change` pending 修改 | ✅ 做梦 prompt 去掉 baseline 输出要求，`applyDreamV2` 删掉 baseline 写入 |
+| 2. 普通 dream 不得自行修改 baseline | ✅ prompt 标注"忽略 baseline 字段" |
+| 3. baseline pending 独立处理，不随分批重复 | ✅ `applyBaselineChanges` 按 scope 分组一次性处理（第一批处理完后后续批查不到 pending） |
+| 4. 每晚每个有 pending 的角色只合并写入一次 | ✅ |
+| 5. 没有 pending 就不调用 baseline 模型 | ✅ `pending.length === 0` 直接返回 |
+| 6. 生成+写入都成功才标记 applied；失败保留 pending 重试 | ✅ 临时故障（缺模型/调用失败/返回空/写入失败）用 `markBaselineChangelogError`（只记 error 不改 status）；读取旧 baseline 失败跳过该 scope |
+| 7. MCP 校验：add 必须有 after / update 必须有 before+after / delete 必须有 before / role_id+reason 必填 / 不允许 shared | ✅ |
+
+**屏蔽原子记忆 pending：** `memory_change_add/update/delete` 从 `getTools()` 注释掉（handler 代码保留），模型看不到。`memory_upsert` 保留（实时写原子记忆）。
+
+**pending 注入格式（对话中防重复提交）：**
+- `PendingChange` 加 `before_content` 字段
+- baseline pending op 加 `baseline_` 前缀区分
+- 注入格式：`[baseline] 修改：原文 → 修改后（理由：...）` / `[baseline] 新增：内容（理由：...）` / `[baseline] 删除：原文（理由：...）`
+- 原子记忆 pending 也统一加了 before + reason
+- 两个适配器（OpenAI + Anthropic text/toolcall 双模式）同步更新
+
+**新角色首版 baseline：** 模型看到 `<long_term_baselines>` 为空时，通过系统提示引导主动提交首版 `baseline_change`（op=add）。
 
 ### 行为测试（12 项全部完成）
 
@@ -173,13 +214,14 @@ test/
       + dreamFlow.test.ts (10) / bootPackageScoping (4) / crossScopeDedup (6)
       + boostPostRerankerStats (6) / pendingAndPrivateFields (6) / autoExtractDisabled (5)
       + batchDailyLogMerge (5) / dreamGroupWriteWhitelist (4) / duplicateTargetConflict (5)
+      + baselinePending (7)
     p1/              — 15 tests
       + recallCrossScopeDedup (7) / operitRoleContextIntegration (8)
   utils/
     roleContext.test.ts — 20 tests (Operit 标记解析)
   phase1-4_5/        — 前一轮改造测试
 ```
-**当前总数：36 个测试文件，207 项测试全部通过**
+**当前总数：37 个测试文件，214 项测试全部通过**
 
 **运行命令：**
 ```bash
@@ -234,8 +276,8 @@ git pull origin feat/multirole-memory
 npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs
 ```
 
-确认全绿。**全部清单项已完成**（10 项 P0/P1 修复 + 12 项行为测试 + 4 项第二轮补充修复），无待做。
-下一步是部署（见第七节），部署前必须先备份远程 D1（0006 含 DROP TABLE + RENAME）。
+确认全绿。**全部清单项已完成**（10 项 P0/P1 修复 + 12 项行为测试 + 4 项第二轮补充修复 + baseline pending 机制第三轮），无待做。
+下一步是部署（见第七节），部署前必须先备份远程 D1（0006 含 DROP TABLE + RENAME；0007 新建表，安全）。
 
 ---
 
@@ -254,10 +296,13 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 11. **pending 注入查 shared + 当前角色并集** — 不只查当前角色
 12. **做梦 groups 输出已解析** — normalizeDigestResult 解析 groups 并展平到 memories_to_update/delete
 13. **基线注入只读当前角色** — buildBootPackage 只查 `getBaselines({roleScope})`，不读全部再排序
-14. **同日分批日记合并** — 非首批读取已有 daily_log 喂入 prompt，模型输出合并版完整 daily_log；baseline 仍按旧 baseline 继承规则
-15. **Dream 输出角色组写入白名单** — applyDreamV2 写 daily_log/baseline 时用 `groupScopes`（来自本次实际构建的 roleGroups）过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn
+14. **同日分批日记合并** — 非首批读取已有 daily_log 喂入 prompt，模型输出合并版完整 daily_log
+15. **Dream 输出角色组写入白名单** — applyDreamV2 写 daily_log 时用 `groupScopes` 过滤；重复 scope 只接受第一个；不在 allowed scopes 的 group 跳过 + warn
 16. **重复 target 真正阻止** — 两阶段检测：统计每个 target_id 的 op 次数（update+delete 各算一次），只对 op 次数==1 的 target 执行；同 target update+delete 视为冲突，两个都不执行
-17. **Operit 角色标记解析** — `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` 标记；顶层优先 + 缺字段才用标记；多标记拒绝全部回退顶层；残缺/解析失败/超长/未知字段一律删标记 + warn 不转发上游；标记不得出现在上游/数据库/dream/五轮历史/assembler/日志
-18. **token 超限自动拆分尚未实现** — 当前依赖 DREAM_MAX_ROLES_PER_RUN 限制
-19. **清单要求行为测试** — 不能只用源码正则检查代替端到端测试
-20. **wrangler d1 本地验证 migration** — 用临时 toml 指向本地 D1，真实执行 migration 验证 ALTER 顺序（见第三节末尾命令）
+17. **Operit 角色标记解析** — `extractOperitRoleContext` 严格解析独立 SYSTEM `<aelios_role_context>` 标记；顶层优先 + 缺字段才用标记；多标记拒绝全部回退顶层；残缺/解析失败/超长/未知字段一律删标记 + warn 不转发上游
+18. **baseline 不再由做梦生成** — 只通过 `baseline_change` MCP pending 修改；做梦 prompt 忽略 baseline；`applyBaselineChanges` 按 scope 分组合并，每 scope 调一次模型
+19. **baseline pending 错误处理** — 临时故障（缺模型/调用失败/返回空/写入失败）保持 pending + 记录 error，下次 dream 重试；读取旧 baseline 失败跳过该 scope 不覆盖；applied 时清除 error_message
+20. **原子记忆 pending 已屏蔽** — `memory_change_add/update/delete` 从 getTools 注释掉；`memory_upsert` 保留实时写
+21. **token 超限自动拆分尚未实现** — 当前依赖 DREAM_MAX_ROLES_PER_RUN 限制
+22. **清单要求行为测试** — 不能只用源码正则检查代替端到端测试
+23. **wrangler d1 本地验证 migration** — 用临时 toml 指向本地 D1，真实执行 migration 验证 ALTER 顺序（见第三节末尾命令）
