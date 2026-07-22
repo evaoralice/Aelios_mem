@@ -48,6 +48,7 @@ const markChangelogConflict = vi.fn<(...args: any[]) => Promise<void>>(async () 
 const listPendingBaselineChangelog = vi.fn<(...args: any[]) => Promise<any[]>>(async () => [] as any[]);
 const markBaselineChangelogApplied = vi.fn<(...args: any[]) => Promise<void>>(async () => {});
 const markBaselineChangelogConflict = vi.fn<(...args: any[]) => Promise<void>>(async () => {});
+const markBaselineChangelogError = vi.fn<(...args: any[]) => Promise<void>>(async () => {});
 const getBaselines = vi.fn<(...args: any[]) => Promise<any[]>>(async () => [] as any[]);
 const getDailyLog = vi.fn<(...args: any[]) => Promise<any>>(async () => null);
 const fetchMemoryLifecycleRows = vi.fn<(...args: any[]) => Promise<any[]>>(async () => [] as any[]);
@@ -74,6 +75,7 @@ vi.mock("../../../src/db/v2", async (importOriginal) => {
     listPendingBaselineChangelog: (...args: any[]) => listPendingBaselineChangelog(...args),
     markBaselineChangelogApplied: (...args: any[]) => markBaselineChangelogApplied(...args),
     markBaselineChangelogConflict: (...args: any[]) => markBaselineChangelogConflict(...args),
+    markBaselineChangelogError: (...args: any[]) => markBaselineChangelogError(...args),
     getBaselines: (...args: any[]) => getBaselines(...args),
     getDailyLog: (...args: any[]) => getDailyLog(...args),
   };
@@ -105,6 +107,7 @@ beforeEach(() => {
   callOpenAICompat.mockResolvedValue(new Response("{}", { status: 200 }));
   listPendingChangelog.mockResolvedValue([]);
   listPendingBaselineChangelog.mockResolvedValue([]);
+  markBaselineChangelogError.mockClear();
   getBaselines.mockResolvedValue([]);
   getDailyLog.mockResolvedValue(null);
   (getVectorMemory as any).mockResolvedValue(null);
@@ -214,7 +217,9 @@ describe("Baseline pending 机制", () => {
 
     await runDailyMemoryDigest(mkEnv(), "ns", { dateLabel: "2025-07-18", force: true });
     expect(upsertBaseline).not.toHaveBeenCalled();
-    expect(markBaselineChangelogConflict).toHaveBeenCalledWith(expect.anything(), { id: "bch2", errorMessage: "model returned empty" });
+    // 临时故障不标记 conflict，保持 pending 下次重试
+    expect(markBaselineChangelogConflict).not.toHaveBeenCalled();
+    expect(markBaselineChangelogError).toHaveBeenCalledWith(expect.anything(), { id: "bch2", errorMessage: "model returned empty" });
   });
 
   it("多个角色有 pending → 各自调一次模型合并", async () => {

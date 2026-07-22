@@ -29,6 +29,7 @@ import {
   listPendingBaselineChangelog,
   markBaselineChangelogApplied,
   markBaselineChangelogConflict,
+  markBaselineChangelogError,
   getBaselines,
   getDailyLog,
   DIGEST_MAX_CHARS
@@ -970,12 +971,21 @@ async function applyBaselineChanges(
   for (const [scope, entries] of byScope) {
     // 读旧 baseline
     let oldBaseline = "";
+    let readFailed = false;
     try {
       const baselineRows = await getBaselines(env.DB, { namespace, roleScope: scope });
       oldBaseline = baselineRows[0]?.content ?? "";
     } catch (error) {
       console.warn(`baseline pending: failed to read old baseline for ${scope}`, error);
-      // 读旧 baseline 失败不影响合并，空字符串即可
+      readFailed = true;
+    }
+    // 读取失败时跳过该 scope（保持 pending + 记录错误），避免用空 baseline 覆盖原内容
+    if (readFailed) {
+      console.warn(`baseline pending: skipping ${scope} due to baseline read failure`);
+      for (const entry of entries) {
+        await markBaselineChangelogError(env.DB, { id: entry.id, errorMessage: "failed to read old baseline" });
+      }
+      continue;
     }
 
     // 构造合并 prompt
@@ -1011,8 +1021,7 @@ async function applyBaselineChanges(
     if (!model) {
       console.error("baseline pending: missing dream model");
       for (const entry of entries) {
-        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "missing model" });
-        conflicts++;
+        await markBaselineChangelogError(env.DB, { id: entry.id, errorMessage: "missing model" });
       }
       continue;
     }
@@ -1037,8 +1046,7 @@ async function applyBaselineChanges(
     } catch (error) {
       console.error(`baseline pending: model call failed for ${scope}`, error);
       for (const entry of entries) {
-        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "model call failed" });
-        conflicts++;
+        await markBaselineChangelogError(env.DB, { id: entry.id, errorMessage: "model call failed" });
       }
       continue;
     }
@@ -1046,8 +1054,7 @@ async function applyBaselineChanges(
     if (!newBaseline || !newBaseline.trim()) {
       console.warn(`baseline pending: model returned empty for ${scope}`);
       for (const entry of entries) {
-        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "model returned empty" });
-        conflicts++;
+        await markBaselineChangelogError(env.DB, { id: entry.id, errorMessage: "model returned empty" });
       }
       continue;
     }
@@ -1064,8 +1071,7 @@ async function applyBaselineChanges(
     } catch (error) {
       console.error(`baseline pending: write failed for ${scope}`, error);
       for (const entry of entries) {
-        await markBaselineChangelogConflict(env.DB, { id: entry.id, errorMessage: "write failed" });
-        conflicts++;
+        await markBaselineChangelogError(env.DB, { id: entry.id, errorMessage: "write failed" });
       }
     }
   }

@@ -1381,3 +1381,14 @@ export async function markBaselineChangelogConflict(
     .bind(input.errorMessage, input.id)
     .run();
 }
+
+// 记录错误但保持 pending（临时故障，下次 dream 重试）
+export async function markBaselineChangelogError(
+  db: D1Database,
+  input: { id: string; errorMessage: string }
+): Promise<void> {
+  await db
+    .prepare("UPDATE baseline_changelog SET error_message = ? WHERE id = ?")
+    .bind(input.errorMessage, input.id)
+    .run();
+}
