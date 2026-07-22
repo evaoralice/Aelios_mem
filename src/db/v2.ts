@@ -1367,7 +1367,7 @@ export async function markBaselineChangelogApplied(
   input: { id: string }
 ): Promise<void> {
   await db
-    .prepare("UPDATE baseline_changelog SET status = 'applied', applied_at = ? WHERE id = ?")
+    .prepare("UPDATE baseline_changelog SET status = 'applied', applied_at = ?, error_message = NULL WHERE id = ?")
     .bind(nowIso(), input.id)
     .run();
 }
