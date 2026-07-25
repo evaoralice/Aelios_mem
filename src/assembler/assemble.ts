@@ -81,8 +81,8 @@ function extractSystemMessages(messages: OpenAIChatMessage[]): OpenAIChatMessage
 }
 
 /**
- * All user/assistant messages EXCEPT the last user message.
- * Skips system and tool messages.
+ * All user/assistant/tool messages EXCEPT the last user message.
+ * Skips system messages.
  * Preserves original message objects (no content flattening).
  */
 function extractHistoryMessages(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
@@ -98,7 +98,7 @@ function extractHistoryMessages(messages: OpenAIChatMessage[]): OpenAIChatMessag
   const result: OpenAIChatMessage[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (msg.role !== "user" && msg.role !== "assistant") continue;
+    if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") continue;
     if (i === lastUserIdx) continue;
     result.push(msg);
   }

@@ -121,9 +121,16 @@ export interface PendingChange {
   reason: string | null;
 }
 
+export interface AssembledMessage {
+  role: "user" | "assistant" | "tool";
+  content: string | unknown[] | null;
+  tool_calls?: unknown;
+  tool_call_id?: string;
+}
+
 export interface AssembledPrompt {
   system_blocks: SystemBlock[];
-  messages: Array<{ role: "user" | "assistant"; content: string | unknown[] | null }>;
+  messages: AssembledMessage[];
   synthetic_context?: SyntheticContext;
   pending_changes?: PendingChange[];
   meta: {

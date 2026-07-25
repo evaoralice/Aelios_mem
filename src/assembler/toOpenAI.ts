@@ -41,10 +41,15 @@ export function assembledToOpenAISystem(
 export function assembledToOpenAIMessages(
   messages: AssembledPrompt["messages"]
 ): OpenAIChatMessage[] {
-  return messages.map((msg) => ({
-    role: msg.role,
-    content: msg.content as string | Array<unknown> | null,
-  }));
+  return messages.map((msg) => {
+    const out: OpenAIChatMessage = {
+      role: msg.role,
+      content: msg.content as string | Array<unknown> | null,
+    };
+    if (msg.tool_calls != null) out.tool_calls = msg.tool_calls;
+    if (msg.tool_call_id != null) out.tool_call_id = msg.tool_call_id;
+    return out;
+  });
 }
 
 // ---------------------------------------------------------------------------

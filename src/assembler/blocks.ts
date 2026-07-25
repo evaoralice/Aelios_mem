@@ -14,6 +14,7 @@
 import type { MemoryApiRecord, OpenAIChatMessage } from "../types";
 import { preprocessHistory } from "../preset/historyPreprocess";
 import type {
+  AssembledMessage,
   AssembledPrompt,
   AssemblerContext,
   Block,
@@ -62,8 +63,15 @@ function isNonEmptyContent(content: OpenAIChatMessage["content"]): boolean {
 
 function messageToOutput(
   msg: OpenAIChatMessage
-): { role: "user" | "assistant"; content: string | unknown[] | null } | null {
-  if (msg.role !== "user" && msg.role !== "assistant") return null;
+): AssembledMessage | null {
+  if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") return null;
+  if (msg.role === "tool") {
+    if (!isNonEmptyContent(msg.content)) return null;
+    return { role: "tool", content: msg.content, tool_call_id: msg.tool_call_id };
+  }
+  if (msg.role === "assistant" && msg.tool_calls != null) {
+    return { role: "assistant", content: msg.content, tool_calls: msg.tool_calls };
+  }
   if (!isNonEmptyContent(msg.content)) return null;
   return { role: msg.role, content: msg.content };
 }
@@ -431,7 +439,7 @@ if (ALL_BLOCKS.length !== BLOCK_MAP.size) {
  */
 export function assemble(ctx: AssemblerContext): AssembledPrompt {
   const systemBlocks: SystemBlock[] = [];
-  const messages: Array<{ role: "user" | "assistant"; content: string | unknown[] | null }> = [];
+  const messages: AssembledMessage[] = [];
   const enabledBlockIds: string[] = [];
   let anchorIndex = -1;
 

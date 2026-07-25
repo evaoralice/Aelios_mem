@@ -61,7 +61,7 @@ ANTHROPIC_THINKING_ENABLED = "false"
 ANTHROPIC_THINKING_BUDGET = "1024"
 ANTHROPIC_CACHE_ENABLED = "true"
 ANTHROPIC_AUTO_CACHE_ENABLED = "true"
-ANTHROPIC_ROLLING_CACHE_ENABLED = "true"
+ANTHROPIC_ROLLING_CACHE_ENABLED = "false"
 ANTHROPIC_CACHE_TTL = "5m"
 # For custom Anthropic-compatible providers whose base_url already ends in /v1,
 # keep this as "messages". If the base_url is only the root domain, use

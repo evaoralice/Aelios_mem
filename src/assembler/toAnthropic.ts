@@ -110,6 +110,48 @@ export function assembledToAnthropicMessages(
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+
+    // tool message → Anthropic user message with tool_result block
+    if (msg.role === "tool") {
+      const text = contentToPlainText(msg.content);
+      const block: AnthropicToolResultBlock = {
+        type: "tool_result",
+        tool_use_id: msg.tool_call_id ?? "unknown",
+        content: text,
+      };
+      const prev = wire[wire.length - 1];
+      if (prev?.role === "user") {
+        prev.content.push(block);
+        indexMap.set(i, wire.length - 1);
+      } else {
+        wire.push({ role: "user", content: [block] });
+        indexMap.set(i, wire.length - 1);
+      }
+      continue;
+    }
+
+    // assistant with tool_calls → Anthropic assistant message with tool_use blocks
+    if (msg.role === "assistant" && msg.tool_calls != null) {
+      const blocks: AnthropicContentBlock[] = [];
+      const text = contentToPlainText(msg.content);
+      if (text) blocks.push({ type: "text", text });
+      const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+      for (const tc of toolCalls) {
+        const call = tc as { id?: string; function?: { name?: string; arguments?: string } };
+        blocks.push({
+          type: "tool_use",
+          id: call.id ?? `call_${i}`,
+          name: call.function?.name ?? "",
+          input: safeParseJSON(call.function?.arguments),
+        });
+      }
+      if (blocks.length > 0) {
+        wire.push({ role: "assistant", content: blocks });
+        indexMap.set(i, wire.length - 1);
+      }
+      continue;
+    }
+
     const role = msg.role;
     const text = contentToPlainText(msg.content);
 
