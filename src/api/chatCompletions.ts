@@ -282,6 +282,10 @@ export async function handleChatCompletions(
     }
 
     const parsed = parseAnthropicNonStream(anthropicParsed as never);
+    // TEMP DEBUG: log tool_calls in non-stream response
+    if (parsed.openai.choices?.[0]?.message?.tool_calls) {
+      console.log("DEBUG tool_calls returned to client:", JSON.stringify(parsed.openai.choices[0].message.tool_calls));
+    }
     const anthropicCacheMode = getAnthropicCacheMode(env);
     // Filter visible content only — reasoning_content is preserved upstream.
     const filteredContent = applyRegexRules(parsed.content, CONTENT_RULES);
@@ -342,6 +346,11 @@ export async function handleChatCompletions(
     parsed = JSON.parse(responseText) as OpenAIChatResponse;
   } catch {
     return openAiError("Upstream returned invalid JSON", 502);
+  }
+
+  // TEMP DEBUG: log tool_calls in non-stream response
+  if (parsed.choices?.[0]?.message?.tool_calls) {
+    console.log("DEBUG tool_calls returned to client:", JSON.stringify(parsed.choices[0].message.tool_calls));
   }
 
   const assistantContent = extractAssistantText(parsed);

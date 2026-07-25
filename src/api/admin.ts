@@ -4,76 +4,158 @@ const ADMIN_HTML = String.raw`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Aelios Memory</title>
+<script src="https://cdn.tailwindcss.com"></script>
 <script>
-tailwind = {
-  config: {
-    theme: {
-      extend: {
-        fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'] },
-        colors: { coral: '#F4A07C' }
-      }
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'] },
+      colors: { coral: '#F4A07C' }
     }
   }
 };
 </script>
-<script src="https://cdn.tailwindcss.com"></script>
 <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/lucide@latest"></script>
 <script>
-document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colorMode') || 'light';
+document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colorMode') || 'dark';
 </script>
 <style>
-  :root { color-scheme: dark; }
-  :root[data-theme="light"] { color-scheme: light; }
+  /* 「静夜」主题：所有配色走 CSS 变量，夜间=星空，白天=破晓 */
+  :root {
+    color-scheme: dark;
+    --bg-0: #0c1126;
+    --bg-1: #070a15;
+    --nebula-1: rgba(96, 108, 180, .14);
+    --nebula-2: rgba(60, 70, 130, .18);
+    --card: rgba(19, 26, 52, .72);
+    --card-hover: #1b2444;
+    --card-active: #212c50;
+    --inset: #0a0f22;
+    --nav-bg: rgba(7, 10, 21, .92);
+    --line: rgba(158, 172, 216, .15);
+    --ink: #e9ecf6;
+    --ink-soft: #c9cfe2;
+    --muted: #8b93b0;
+    --faint: #646c8a;
+    --on-accent: #1c1410;
+    --accent-soft: rgba(244, 160, 124, .14);
+    --scrollbar: #2c3554;
+    --shadow: 0 1px 2px rgba(3, 5, 12, .4);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg-0: #f6f3ec;
+    --bg-1: #edf0f6;
+    --nebula-1: rgba(244, 166, 120, .13);
+    --nebula-2: rgba(150, 170, 225, .15);
+    --card: #ffffff;
+    --card-hover: #f4f1ea;
+    --card-active: #ece8de;
+    --inset: #faf8f2;
+    --nav-bg: rgba(246, 243, 236, .94);
+    --line: #e3dfd4;
+    --ink: #232a45;
+    --ink-soft: #3d445c;
+    --muted: #616879;
+    --faint: #8b90a0;
+    --on-accent: #1c1410;
+    --accent-soft: rgba(224, 138, 92, .16);
+    --scrollbar: #d8d4c8;
+    --shadow: 0 1px 2px rgba(35, 42, 69, .08);
+  }
   [x-cloak] { display: none !important; }
-  html, body { min-height: 100%; background: #0a0a0b; }
-  body { margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
-  * { scrollbar-width: thin; scrollbar-color: #3f3f46 #18181b; }
+  html { min-height: 100%; background: var(--bg-1); }
+  body {
+    min-height: 100%;
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.55;
+    background:
+      radial-gradient(1200px 700px at 82% -12%, var(--nebula-1), transparent 62%),
+      radial-gradient(1000px 720px at 8% 112%, var(--nebula-2), transparent 60%),
+      linear-gradient(178deg, var(--bg-0), var(--bg-1));
+    background-attachment: fixed;
+  }
+  /* 星点：两层不同尺度的静止星野，仅在夜间模式显示 */
+  body::before, body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-repeat: repeat;
+  }
+  body::before {
+    background-image:
+      radial-gradient(circle 1.1px at 24px 48px, rgba(235, 240, 255, .9) 100%, transparent 100%),
+      radial-gradient(circle .8px at 130px 210px, rgba(235, 240, 255, .55) 100%, transparent 100%),
+      radial-gradient(circle 1px at 305px 96px, rgba(255, 236, 210, .65) 100%, transparent 100%),
+      radial-gradient(circle .8px at 425px 300px, rgba(235, 240, 255, .5) 100%, transparent 100%),
+      radial-gradient(circle 1.2px at 525px 64px, rgba(235, 240, 255, .8) 100%, transparent 100%),
+      radial-gradient(circle .7px at 640px 345px, rgba(220, 228, 255, .45) 100%, transparent 100%),
+      radial-gradient(circle 1px at 96px 385px, rgba(235, 240, 255, .6) 100%, transparent 100%),
+      radial-gradient(circle .8px at 715px 140px, rgba(235, 240, 255, .55) 100%, transparent 100%);
+    background-size: 760px 460px;
+    opacity: .7;
+  }
+  body::after {
+    background-image:
+      radial-gradient(circle 1.4px at 180px 260px, rgba(240, 244, 255, .95) 100%, transparent 100%),
+      radial-gradient(circle 1px at 560px 80px, rgba(235, 240, 255, .6) 100%, transparent 100%),
+      radial-gradient(circle 1.6px at 880px 420px, rgba(255, 240, 220, .8) 100%, transparent 100%),
+      radial-gradient(circle 1px at 1020px 160px, rgba(235, 240, 255, .55) 100%, transparent 100%),
+      radial-gradient(circle 1.2px at 60px 620px, rgba(228, 234, 255, .65) 100%, transparent 100%);
+    background-size: 1180px 760px;
+    opacity: .55;
+  }
+  :root[data-theme="light"] body::before,
+  :root[data-theme="light"] body::after { display: none; }
+  body > div { position: relative; z-index: 1; }
+
+  * { scrollbar-width: thin; scrollbar-color: var(--scrollbar) var(--inset); }
   button, input, textarea, select { font: inherit; }
   :focus-visible { outline: 2px solid #F4A07C; outline-offset: 2px; }
   h1, h2, button, .text-keep { word-break: keep-all; }
+  h1 { letter-spacing: .02em; }
   .tap { min-height: 44px; min-width: 44px; }
+  .rounded-2xl { border-radius: 14px !important; }
+  .shadow-sm { box-shadow: var(--shadow) !important; }
+
+  /* 把现有 Tailwind 类映射到主题变量，HTML 结构零改动 */
+  .bg-zinc-900 { background-color: var(--card) !important; }
+  .hover\:bg-zinc-900:hover { background-color: var(--card-hover) !important; }
+  .active\:bg-zinc-800:active { background-color: var(--card-active) !important; }
+  .bg-\[\#0a0a0b\] { background-color: var(--inset) !important; }
+  .bg-\[\#0a0a0b\]\/95 { background-color: var(--nav-bg) !important; }
+  .border-zinc-800 { border-color: var(--line) !important; }
+  .ring-zinc-800 { --tw-ring-color: var(--line) !important; }
+  .text-zinc-100 { color: var(--ink) !important; }
+  .hover\:text-zinc-100:hover { color: var(--ink) !important; }
+  .text-zinc-300 { color: var(--ink-soft) !important; }
+  .text-zinc-400 { color: var(--muted) !important; }
+  .text-zinc-500 { color: var(--faint) !important; }
+  .text-zinc-950 { color: var(--on-accent) !important; }
+  input, textarea, pre { color: var(--ink); }
+
   .choice-tab {
-    border-color: #27272a;
-    background-color: #18181b;
-    color: #a1a1aa;
+    border-color: var(--line);
+    background-color: var(--card);
+    color: var(--muted);
   }
   .choice-tab.is-active {
     border-color: #F4A07C;
-    background-color: rgba(244, 160, 124, .16);
-    color: #f4f4f5;
+    background-color: var(--accent-soft);
+    color: var(--ink);
     font-weight: 650;
   }
-  :root[data-theme="light"] body,
-  :root[data-theme="light"] .bg-\[\#0a0a0b\] { background-color: #f6f7f8 !important; }
-  :root[data-theme="light"] .bg-\[\#0a0a0b\]\/95 { background-color: rgb(246 247 248 / .95) !important; }
-  :root[data-theme="light"] .bg-zinc-900 { background-color: #ffffff !important; }
-  :root[data-theme="light"] .active\:bg-zinc-800:active,
-  :root[data-theme="light"] .hover\:bg-zinc-900:hover { background-color: #f0f1f3 !important; }
-  :root[data-theme="light"] .text-zinc-100 { color: #18181b !important; }
-  :root[data-theme="light"] .hover\:text-zinc-100:hover { color: #18181b !important; }
-  :root[data-theme="light"] .text-zinc-300 { color: #3f3f46 !important; }
-  :root[data-theme="light"] .text-zinc-400 { color: #71717a !important; }
-  :root[data-theme="light"] .text-zinc-950 { color: #18181b !important; }
-  :root[data-theme="light"] .border-zinc-800 { border-color: #e4e4e7 !important; }
-  :root[data-theme="light"] .ring-zinc-800 { --tw-ring-color: #e4e4e7 !important; }
-  :root[data-theme="light"] input,
-  :root[data-theme="light"] textarea,
-  :root[data-theme="light"] pre { color: #18181b; }
-  :root[data-theme="light"] * { scrollbar-color: #d4d4d8 #f6f7f8; }
-  :root[data-theme="light"] .choice-tab {
-    border-color: #e4e4e7;
-    background-color: #ffffff;
-    color: #71717a;
-  }
-  :root[data-theme="light"] .choice-tab.is-active {
-    border-color: #F4A07C;
-    background-color: rgba(244, 160, 124, .24);
-    color: #18181b;
-  }
+  /* 破晓模式下 coral 略加深，保证白底可读 */
+  :root[data-theme="light"] .text-coral { color: #d97a4f !important; }
+  :root[data-theme="light"] .hover\:border-coral:hover,
+  :root[data-theme="light"] .border-coral { border-color: #dd8a5c !important; }
 </style>
 </head>
-<body class="bg-[#0a0a0b] text-zinc-100 antialiased">
+<body class="text-zinc-100 antialiased">
 <div x-data="memoryAdmin()" x-init="init()" x-cloak class="min-h-dvh pb-24 md:pb-0">
   <div class="mx-auto flex min-h-dvh w-full max-w-[1440px] md:px-4 md:py-4">
     <aside class="hidden w-64 shrink-0 flex-col gap-4 border-r border-zinc-800 px-3 py-3 md:flex">
@@ -449,7 +531,7 @@ function memoryAdmin() {
     apiKey: localStorage.getItem('aelios.admin.apiKey') || '',
     savedApiKey: localStorage.getItem('aelios.admin.apiKey') || '',
     namespace: localStorage.getItem('aelios.admin.namespace') || 'default',
-    theme: localStorage.getItem('aelios.admin.colorMode') || 'light',
+    theme: localStorage.getItem('aelios.admin.colorMode') || 'dark',
     boot: {},
     stats: {},
     digestDraft: '',
