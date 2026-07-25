@@ -105,19 +105,27 @@ export async function handleChatCompletions(
     roleName: requestRoleName
   });
 
-  const savedUserMessageIds = await saveUserMessages(env.DB, {
-    conversationId: conversation.id,
-    namespace: auth.profile.namespace,
-    source: auth.profile.source,
-    messages: body.messages,
-    requestModel: body.model,
-    upstreamModel: targetModel,
-    upstreamProvider: provider,
-    stream: Boolean(body.stream),
-    roleId: requestRoleId,
-    roleName: requestRoleName
-  });
-  const latestUserMessageId = savedUserMessageIds[savedUserMessageIds.length - 1];
+  // Only save user message when the request ends with a user message.
+  // Tool continuation requests (ending with tool result) must NOT re-save
+  // the previous user message — it was already saved in the original request.
+  const endsWithUser = body.messages.length > 0 && body.messages[body.messages.length - 1].role === "user";
+
+  let savedUserMessageIds: string[] = [];
+  if (endsWithUser) {
+    savedUserMessageIds = await saveUserMessages(env.DB, {
+      conversationId: conversation.id,
+      namespace: auth.profile.namespace,
+      source: auth.profile.source,
+      messages: body.messages,
+      requestModel: body.model,
+      upstreamModel: targetModel,
+      upstreamProvider: provider,
+      stream: Boolean(body.stream),
+      roleId: requestRoleId,
+      roleName: requestRoleName
+    });
+  }
+  const latestUserMessageId = savedUserMessageIds.length > 0 ? savedUserMessageIds[savedUserMessageIds.length - 1] : undefined;
 
   const namespace = auth.profile.namespace;
   const lastUserText = extractLastUserText(body.messages);
@@ -288,43 +296,52 @@ export async function handleChatCompletions(
     if (parsed.openai.choices?.[0]?.message) {
       parsed.openai.choices[0].message.content = filteredContent;
     }
-    const assistantMessageId = await saveAssistantMessage(env.DB, {
-      conversationId: conversation.id,
-      namespace: auth.profile.namespace,
-      source: auth.profile.source,
-      content: filteredContent,
-      requestModel: body.model,
-      upstreamModel: targetModel,
-      provider,
-      stream: false,
-      finishReason: parsed.finishReason,
-      usage: parsed.usage,
-      cacheMode: anthropicCacheMode,
-      cacheTtl: env.ANTHROPIC_CACHE_TTL || "5m",
-      roleId: requestRoleId,
-      roleName: requestRoleName
-    });
-
-    ctx.waitUntil(
-      Promise.all([
-        saveUsageLog(env.DB, {
-          messageId: assistantMessageId,
+    // Skip saving tool-call-only assistant responses with empty visible content
+    // (they have no conversational value for dream/memory)
+    const hasToolCalls = Boolean(parsed.openai.choices?.[0]?.message?.tool_calls);
+    const assistantMessageId = filteredContent || !hasToolCalls
+      ? await saveAssistantMessage(env.DB, {
+          conversationId: conversation.id,
           namespace: auth.profile.namespace,
+          source: auth.profile.source,
+          content: filteredContent,
+          requestModel: body.model,
+          upstreamModel: targetModel,
           provider,
-          model: targetModel,
+          stream: false,
+          finishReason: parsed.finishReason,
           usage: parsed.usage,
           cacheMode: anthropicCacheMode,
           cacheTtl: env.ANTHROPIC_CACHE_TTL || "5m",
-          clientSystemHash,
-          cacheAnchorBlock
-        }),
-        enqueueMemoryMaintenanceIfNeeded(env, {
-          namespace: auth.profile.namespace,
-          conversationId: conversation.id,
-          fromMessageId: latestUserMessageId,
-          toMessageId: assistantMessageId,
-          source: auth.profile.source
-        }),
+          roleId: requestRoleId,
+          roleName: requestRoleName
+        })
+      : null;
+
+    ctx.waitUntil(
+      Promise.all([
+        assistantMessageId
+          ? saveUsageLog(env.DB, {
+              messageId: assistantMessageId,
+              namespace: auth.profile.namespace,
+              provider,
+              model: targetModel,
+              usage: parsed.usage,
+              cacheMode: anthropicCacheMode,
+              cacheTtl: env.ANTHROPIC_CACHE_TTL || "5m",
+              clientSystemHash,
+              cacheAnchorBlock
+            })
+          : Promise.resolve(),
+        assistantMessageId && latestUserMessageId
+          ? enqueueMemoryMaintenanceIfNeeded(env, {
+              namespace: auth.profile.namespace,
+              conversationId: conversation.id,
+              fromMessageId: latestUserMessageId,
+              toMessageId: assistantMessageId,
+              source: auth.profile.source
+            })
+          : Promise.resolve(),
         enqueueRetentionIfNeeded(env, auth.profile.namespace)
       ])
     );
@@ -350,39 +367,47 @@ export async function handleChatCompletions(
   if (parsed.choices?.[0]?.message) {
     parsed.choices[0].message.content = filteredContent;
   }
-  const assistantMessageId = await saveAssistantMessage(env.DB, {
-    conversationId: conversation.id,
-    namespace: auth.profile.namespace,
-    source: auth.profile.source,
-    content: filteredContent,
-    requestModel: body.model,
-    upstreamModel: targetModel,
-    provider,
-    stream: false,
-    finishReason: parsed.choices?.[0]?.finish_reason,
-    usage: parsed.usage,
-    roleId: requestRoleId,
-    roleName: requestRoleName
-  });
+  // Skip saving tool-call-only assistant responses with empty visible content
+  const hasToolCalls = Boolean(parsed.choices?.[0]?.message?.tool_calls);
+  const assistantMessageId = filteredContent || !hasToolCalls
+    ? await saveAssistantMessage(env.DB, {
+        conversationId: conversation.id,
+        namespace: auth.profile.namespace,
+        source: auth.profile.source,
+        content: filteredContent,
+        requestModel: body.model,
+        upstreamModel: targetModel,
+        provider,
+        stream: false,
+        finishReason: parsed.choices?.[0]?.finish_reason,
+        usage: parsed.usage,
+        roleId: requestRoleId,
+        roleName: requestRoleName
+      })
+    : null;
 
   ctx.waitUntil(
     Promise.all([
-      saveUsageLog(env.DB, {
-        messageId: assistantMessageId,
-        namespace: auth.profile.namespace,
-        provider,
-        model: targetModel,
-        usage: parsed.usage,
-        clientSystemHash,
-        cacheAnchorBlock
-      }),
-      enqueueMemoryMaintenanceIfNeeded(env, {
-        namespace: auth.profile.namespace,
-        conversationId: conversation.id,
-        fromMessageId: latestUserMessageId,
-        toMessageId: assistantMessageId,
-        source: auth.profile.source
-      }),
+      assistantMessageId
+        ? saveUsageLog(env.DB, {
+            messageId: assistantMessageId,
+            namespace: auth.profile.namespace,
+            provider,
+            model: targetModel,
+            usage: parsed.usage,
+            clientSystemHash,
+            cacheAnchorBlock
+          })
+        : Promise.resolve(),
+      assistantMessageId && latestUserMessageId
+        ? enqueueMemoryMaintenanceIfNeeded(env, {
+            namespace: auth.profile.namespace,
+            conversationId: conversation.id,
+            fromMessageId: latestUserMessageId,
+            toMessageId: assistantMessageId,
+            source: auth.profile.source
+          })
+        : Promise.resolve(),
       enqueueRetentionIfNeeded(env, auth.profile.namespace)
     ])
   );

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { assemble } from "../../src/assembler/assemble";
 import { assembledToOpenAIMessages } from "../../src/assembler/toOpenAI";
+import { assembledToAnthropicMessages } from "../../src/assembler/toAnthropic";
 import type { OpenAIChatRequest, OpenAIChatMessage } from "../../src/types";
 
 function mkMsg(role: string, content: string, extra: Partial<OpenAIChatMessage> = {}): OpenAIChatMessage {
@@ -283,5 +284,158 @@ describe("tool_call/tool_result 透传", () => {
     const callIds = (assistant!.tool_calls as Array<{ id: string }>).map((tc) => tc.id);
     const resultIds = toolResults.map((t) => t.tool_call_id);
     expect(callIds).toEqual(expect.arrayContaining(resultIds));
+  });
+});
+
+describe("Anthropic 格式 tool 透传", () => {
+  it("tool message 转成 Anthropic tool_result block，assistant tool_calls 转成 tool_use block", () => {
+    const messages: OpenAIChatMessage[] = [
+      mkMsg("user", "帮我记一下"),
+      mkMsg("assistant", "", {
+        tool_calls: [
+          { id: "call_anth_1", type: "function", function: { name: "memory_upsert", arguments: '{"fact_key":"x","content":"y"}' } },
+        ],
+      }),
+      mkMsg("tool", '{"id":"mem_1","created":true}', { tool_call_id: "call_anth_1" }),
+      mkMsg("assistant", "记好了"),
+      mkMsg("user", "谢谢"),
+    ];
+
+    const assembled = assemble({
+      request: mkRequest(messages),
+      pinnedPersonaMemories: null,
+      boot: null,
+      ragMemories: [],
+      visionOutput: null,
+    });
+
+    const { wire } = assembledToAnthropicMessages(assembled.messages);
+
+    // 找到 assistant 带 tool_use 的 wire message
+    const toolUseMsg = wire.find((m) =>
+      Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_use")
+    );
+    expect(toolUseMsg).toBeDefined();
+    expect(toolUseMsg!.role).toBe("assistant");
+    const toolUseBlock = (toolUseMsg!.content as any[]).find((b: any) => b.type === "tool_use");
+    expect(toolUseBlock.id).toBe("call_anth_1");
+    expect(toolUseBlock.name).toBe("memory_upsert");
+
+    // 找到 user 带 tool_result 的 wire message
+    const toolResultMsg = wire.find((m) =>
+      Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_result")
+    );
+    expect(toolResultMsg).toBeDefined();
+    expect(toolResultMsg!.role).toBe("user");
+    const toolResultBlock = (toolResultMsg!.content as any[]).find((b: any) => b.type === "tool_result");
+    expect(toolResultBlock.tool_use_id).toBe("call_anth_1");
+    expect(toolResultBlock.content).toContain("mem_1");
+  });
+
+  it("请求以 tool result 结尾时 Anthropic 格式顺序正确", () => {
+    const messages: OpenAIChatMessage[] = [
+      mkMsg("user", "查一下"),
+      mkMsg("assistant", "", {
+        tool_calls: [
+          { id: "call_anth_end", type: "function", function: { name: "memory_search", arguments: '{"query":"test"}' } },
+        ],
+      }),
+      mkMsg("tool", "search results", { tool_call_id: "call_anth_end" }),
+    ];
+
+    const assembled = assemble({
+      request: mkRequest(messages),
+      pinnedPersonaMemories: null,
+      boot: null,
+      ragMemories: [],
+      visionOutput: null,
+    });
+
+    const { wire } = assembledToAnthropicMessages(assembled.messages);
+
+    // 顺序: user(text) → assistant(tool_use) → user(tool_result)
+    expect(wire.length).toBeGreaterThanOrEqual(3);
+    expect(wire[0].role).toBe("user");
+    expect(wire[1].role).toBe("assistant");
+    expect(wire[2].role).toBe("user");
+
+    // tool_use_id 配对
+    const toolUseBlock = (wire[1].content as any[]).find((b: any) => b.type === "tool_use");
+    const toolResultBlock = (wire[2].content as any[]).find((b: any) => b.type === "tool_result");
+    expect(toolUseBlock.id).toBe(toolResultBlock.tool_use_id);
+    expect(toolUseBlock.id).toBe("call_anth_end");
+  });
+
+  it("多个 tool_call/result 在 Anthropic 格式下配对", () => {
+    const messages: OpenAIChatMessage[] = [
+      mkMsg("user", "查两个"),
+      mkMsg("assistant", "", {
+        tool_calls: [
+          { id: "call_a", type: "function", function: { name: "memory_search", arguments: '{"query":"a"}' } },
+          { id: "call_b", type: "function", function: { name: "memory_search", arguments: '{"query":"b"}' } },
+        ],
+      }),
+      mkMsg("tool", "result a", { tool_call_id: "call_a" }),
+      mkMsg("tool", "result b", { tool_call_id: "call_b" }),
+    ];
+
+    const assembled = assemble({
+      request: mkRequest(messages),
+      pinnedPersonaMemories: null,
+      boot: null,
+      ragMemories: [],
+      visionOutput: null,
+    });
+
+    const { wire } = assembledToAnthropicMessages(assembled.messages);
+
+    // assistant 有两个 tool_use blocks
+    const assistantMsg = wire.find((m) =>
+      Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_use")
+    );
+    const toolUseBlocks = (assistantMsg!.content as any[]).filter((b: any) => b.type === "tool_use");
+    expect(toolUseBlocks.length).toBe(2);
+    expect(toolUseBlocks[0].id).toBe("call_a");
+    expect(toolUseBlocks[1].id).toBe("call_b");
+
+    // 两个 tool_result 在同一个 user message 里（连续合并）
+    const userWithResults = wire.find((m) =>
+      Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_result")
+    );
+    const toolResultBlocks = (userWithResults!.content as any[]).filter((b: any) => b.type === "tool_result");
+    expect(toolResultBlocks.length).toBe(2);
+    expect(toolResultBlocks[0].tool_use_id).toBe("call_a");
+    expect(toolResultBlocks[1].tool_use_id).toBe("call_b");
+  });
+
+  it("空 content tool message 在 Anthropic 格式下仍生成 tool_result", () => {
+    const messages: OpenAIChatMessage[] = [
+      mkMsg("user", "记一下"),
+      mkMsg("assistant", "", {
+        tool_calls: [
+          { id: "call_empty_anth", type: "function", function: { name: "memory_upsert", arguments: "{}" } },
+        ],
+      }),
+      mkMsg("tool", "", { tool_call_id: "call_empty_anth" }),
+      mkMsg("assistant", "记好了"),
+      mkMsg("user", "谢谢"),
+    ];
+
+    const assembled = assemble({
+      request: mkRequest(messages),
+      pinnedPersonaMemories: null,
+      boot: null,
+      ragMemories: [],
+      visionOutput: null,
+    });
+
+    const { wire } = assembledToAnthropicMessages(assembled.messages);
+
+    const toolResultMsg = wire.find((m) =>
+      Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_result")
+    );
+    expect(toolResultMsg).toBeDefined();
+    const toolResultBlock = (toolResultMsg!.content as any[]).find((b: any) => b.type === "tool_result");
+    expect(toolResultBlock.tool_use_id).toBe("call_empty_anth");
   });
 });
