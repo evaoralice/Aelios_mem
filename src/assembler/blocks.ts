@@ -66,9 +66,15 @@ function messageToOutput(
 ): AssembledMessage | null {
   if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") return null;
   if (msg.role === "tool") {
+    // tool messages with tool_call_id must always be preserved, even if
+    // content is empty — otherwise the assistant's tool_call would dangle.
+    if (msg.tool_call_id != null) {
+      return { role: "tool", content: msg.content ?? "", tool_call_id: msg.tool_call_id };
+    }
     if (!isNonEmptyContent(msg.content)) return null;
-    return { role: "tool", content: msg.content, tool_call_id: msg.tool_call_id };
+    return { role: "tool", content: msg.content };
   }
+  // assistant with tool_calls must be preserved even if content is empty/null
   if (msg.role === "assistant" && msg.tool_calls != null) {
     return { role: "assistant", content: msg.content, tool_calls: msg.tool_calls };
   }

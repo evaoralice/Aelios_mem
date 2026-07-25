@@ -84,22 +84,24 @@ function extractSystemMessages(messages: OpenAIChatMessage[]): OpenAIChatMessage
  * All user/assistant/tool messages EXCEPT the last user message.
  * Skips system messages.
  * Preserves original message objects (no content flattening).
+ *
+ * Only the last message is treated as "current" for splitting purposes.
+ * If the request ends with a user message, that user message is split out
+ * as current_user and excluded from history. If the request ends with a
+ * tool result (e.g. after an MCP tool call), nothing is split — the full
+ * user→assistant(tool_call)→tool(result) sequence stays in history in
+ * original order, and current_user is null.
  */
 function extractHistoryMessages(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
-  // Find the index of the last user message
-  let lastUserIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
-
   const result: OpenAIChatMessage[] = [];
+  // Only split out the last message if it's a user message
+  const endsWithUser = messages.length > 0 && messages[messages.length - 1].role === "user";
+
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") continue;
-    if (i === lastUserIdx) continue;
+    // If the request ends with user, skip the last user message (it becomes current_user)
+    if (endsWithUser && i === messages.length - 1) continue;
     result.push(msg);
   }
 
@@ -108,13 +110,16 @@ function extractHistoryMessages(messages: OpenAIChatMessage[]): OpenAIChatMessag
 
 /**
  * The last user message, preserving original content (including image_url).
+ * Only returned when the request ends with a user message — if the request
+ * ends with a tool result (e.g. after MCP tool call), returns null so the
+ * full tool round stays in history.
  * Returns null if no user message exists.
  */
 function extractLastUserMessage(messages: OpenAIChatMessage[]): OpenAIChatMessage | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") return messages[i];
-  }
-  return null;
+  if (messages.length === 0) return null;
+  const last = messages[messages.length - 1];
+  if (last.role !== "user") return null;
+  return last;
 }
 
 // Re-export for adapter convenience
