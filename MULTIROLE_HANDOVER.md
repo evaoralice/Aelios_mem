@@ -55,10 +55,14 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `fb03627` — feat: baseline pending mechanism — model-submitted baseline changes via MCP
 - `1612db0` — fix: baseline pending error handling — keep pending on transient failures, skip on read failure
 - `7b9f146` — fix: clear error_message when marking baseline changelog applied
+- `af4e449` — docs: update handover with round-3 baseline pending mechanism
+- `a9706bd` — debug: log tool_calls returned to client (temp, removed later)
+- `89d72d9` — fix: passthrough tool_call/tool_result in history — stop model repeating MCP calls
+- `60df148` — fix: preserve tool round order when request ends with tool result
 
 > **规则：不自动推送。等用户检查确认后再推送。**
 
-**验证状态：** typecheck ✅ / vitest 214/214 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
+**验证状态：** typecheck ✅ / vitest 222/222 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
 **本地验证命令：** `npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs`
 
 ---
@@ -115,6 +119,20 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - 两个适配器（OpenAI + Anthropic text/toolcall 双模式）同步更新
 
 **新角色首版 baseline：** 模型看到 `<long_term_baselines>` 为空时，通过系统提示引导主动提交首版 `baseline_change`（op=add）。
+
+### tool_call/tool_result 透传修复（第四轮）
+
+**Bug：** `extractHistoryMessages` + `messageToOutput` 过滤了 `role=tool` 消息并丢弃了 assistant 的 `tool_calls` 字段。模型看不到自己的 MCP 调用历史 → 重复 upsert。
+
+**修复：**
+- `assemble.ts` — `extractHistoryMessages` 保留 `role=tool`；只在请求以 user 结尾时拆分 current_user（tool result 结尾时不拆，保持原始顺序）
+- `blocks.ts` — `messageToOutput` 保留 `tool_calls`/`tool_call_id`；tool message 有 tool_call_id 时即使 content 空也保留；assistant 带 tool_calls 时 content 为 null 也保留
+- `types.ts` — 新增 `AssembledMessage` 接口（role 支持 tool）
+- `toOpenAI.ts` — 透传 tool_calls + tool_call_id
+- `toAnthropic.ts` — tool 消息转 Anthropic tool_result block，assistant+tool_calls 转 tool_use block
+- `assemble.ts` — `extractLastUserMessage` 只在最后一条是 user 时返回，不再向后搜索
+
+**测试：** `test/assembler/toolCallPassthrough.test.ts`（8 项）
 
 ### 行为测试（12 项全部完成）
 
@@ -219,9 +237,11 @@ test/
       + recallCrossScopeDedup (7) / operitRoleContextIntegration (8)
   utils/
     roleContext.test.ts — 20 tests (Operit 标记解析)
+  assembler/
+    toolCallPassthrough.test.ts — 8 tests (tool_call/tool_result 透传)
   phase1-4_5/        — 前一轮改造测试
 ```
-**当前总数：37 个测试文件，214 项测试全部通过**
+**当前总数：38 个测试文件，222 项测试全部通过**
 
 **运行命令：**
 ```bash
@@ -241,6 +261,12 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 | `BASELINE_MAX_CHARS_TOTAL` | `8000` | 基线文本总量上限 |
 | `DREAM_MAX_ROLES_PER_RUN` | `5` | 单次做梦最多处理角色数 |
 | `ENABLE_AUTO_MEMORY` | （空=开启） | `false` 时彻底关闭自动提取 |
+| `MEMORY_FILTER_MODEL` | `workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 召回记忆压缩模型（Cloudflare Workers AI，不走 Gateway） |
+| `MEMORY_RERANKER_MODEL` | `workers-ai/@cf/baai/bge-reranker-base` | 召回记忆重排模型（Cloudflare Workers AI，不走 Gateway） |
+| `EMBEDDING_MODEL` | `workers-ai/@cf/google/embeddinggemma-300m` | 向量嵌入模型（Cloudflare Workers AI，不走 Gateway） |
+| `CHAT_MODEL` | `deepseek/deepseek-v4-pro` | 聊天模型（走 CF Gateway，可用 `custom-{slug}/` 前缀路由到 Custom Provider） |
+| `DREAM_MODEL` | `deepseek/deepseek-v4-pro` | 做梦模型（走 CF Gateway） |
+| `MEMORY_INJECTION_MODE` | `text` | 召回记忆注入方式：`text`=追加到 user 消息，`toolcall`=伪造 memory_context tool call |
 
 ---
 
@@ -276,7 +302,7 @@ git pull origin feat/multirole-memory
 npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs
 ```
 
-确认全绿。**全部清单项已完成**（10 项 P0/P1 修复 + 12 项行为测试 + 4 项第二轮补充修复 + baseline pending 机制第三轮），无待做。
+确认全绿。**全部清单项已完成**（10 项 P0/P1 修复 + 12 项行为测试 + 4 项第二轮补充修复 + baseline pending 机制第三轮 + tool_call 透传修复第四轮），无待做。
 下一步是部署（见第七节），部署前必须先备份远程 D1（0006 含 DROP TABLE + RENAME；0007 新建表，安全）。
 
 ---
@@ -306,3 +332,6 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 21. **token 超限自动拆分尚未实现** — 当前依赖 DREAM_MAX_ROLES_PER_RUN 限制
 22. **清单要求行为测试** — 不能只用源码正则检查代替端到端测试
 23. **wrangler d1 本地验证 migration** — 用临时 toml 指向本地 D1，真实执行 migration 验证 ALTER 顺序（见第三节末尾命令）
+24. **tool_call/tool_result 透传** — assembler 不再过滤 tool 消息；请求以 tool result 结尾时不拆分 current_user，保持 `user→assistant(tool_call)→tool(result)` 原始顺序
+25. **CF Gateway Custom Provider slug 必须全小写** — 大写 slug 会导致 URL 路径不匹配
+26. **压缩/重排/嵌入模型走 Workers AI** — 不经过 CF Gateway，用 `CLOUDFLARE_API_TOKEN` 认证；聊天/做梦模型走 CF Gateway
