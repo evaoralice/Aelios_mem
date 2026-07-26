@@ -40,6 +40,7 @@ interface StreamState {
   finishReason: string | null;
   usage?: TokenUsage;
   thinkingFilter: ThinkingFilterState;
+  hasToolCalls: boolean;
   /** Maps Anthropic content_block index → tool call index in the OpenAI output */
   toolCallMap: Map<number, ToolCallAccumulator>;
   /** Counter for assigned tool call indices */
@@ -120,6 +121,7 @@ function consumeAnthropicData(data: string, state: StreamState): StreamDelta | n
 
     // content_block_start with tool_use → emit tool_calls delta with id + name
     if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
+      state.hasToolCalls = true;
       const contentBlockIndex = parsed.index ?? -1;
       const toolCallIndex = state.toolCallCounter++;
       const acc: ToolCallAccumulator = {
@@ -189,6 +191,11 @@ function consumeAnthropicData(data: string, state: StreamState): StreamDelta | n
 }
 
 async function persistStreamResult(options: StreamAnthropicOptions, state: StreamState): Promise<void> {
+  // Skip saving tool-call-only responses with empty visible content
+  if (!state.assistantText && state.hasToolCalls) {
+    return;
+  }
+
   const messageId = await saveAssistantMessage(options.env.DB, {
     conversationId: options.conversationId,
     namespace: options.profile.namespace,
@@ -218,13 +225,15 @@ async function persistStreamResult(options: StreamAnthropicOptions, state: Strea
     cacheAnchorBlock: options.cacheAnchorBlock ?? null
   });
 
-  await enqueueMemoryMaintenanceIfNeeded(options.env, {
-    namespace: options.profile.namespace,
-    conversationId: options.conversationId,
-    fromMessageId: options.fromMessageId,
-    toMessageId: messageId,
-    source: options.profile.source
-  });
+  if (options.fromMessageId) {
+    await enqueueMemoryMaintenanceIfNeeded(options.env, {
+      namespace: options.profile.namespace,
+      conversationId: options.conversationId,
+      fromMessageId: options.fromMessageId,
+      toMessageId: messageId,
+      source: options.profile.source
+    });
+  }
 
   await enqueueRetentionIfNeeded(options.env, options.profile.namespace);
 }
@@ -246,6 +255,7 @@ export function streamAnthropicToOpenAI(upstream: Response, options: StreamAnthr
     reasoningText: "",
     finishReason: null,
     thinkingFilter: createThinkingFilterState(),
+    hasToolCalls: false,
     toolCallMap: new Map(),
     toolCallCounter: 0,
   };

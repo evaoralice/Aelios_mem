@@ -30,6 +30,7 @@ interface StreamState {
   finishReason: string | null;
   usage?: TokenUsage;
   thinkingFilter: ThinkingFilterState;
+  hasToolCalls: boolean;
 }
 
 /**
@@ -85,6 +86,7 @@ function filterOpenAISSEData(
     const hasReasoning = Boolean(choice?.delta?.reasoning_content);
     const hasContent = Boolean(choice?.delta?.content);
     const hasToolCalls = Boolean(choice?.delta?.tool_calls);
+    if (hasToolCalls) state.hasToolCalls = true;
 
     // Filter content if present.
     if (hasContent && choice?.delta) {
@@ -117,6 +119,11 @@ function filterOpenAISSEData(
 }
 
 async function persistStreamResult(options: StreamOpenAIOptions, state: StreamState): Promise<void> {
+  // Skip saving tool-call-only responses with empty visible content
+  if (!state.assistantText && state.hasToolCalls) {
+    return;
+  }
+
   const messageId = await saveAssistantMessage(options.env.DB, {
     conversationId: options.conversationId,
     namespace: options.profile.namespace,
@@ -142,13 +149,15 @@ async function persistStreamResult(options: StreamOpenAIOptions, state: StreamSt
     cacheAnchorBlock: options.cacheAnchorBlock ?? null
   });
 
-  await enqueueMemoryMaintenanceIfNeeded(options.env, {
-    namespace: options.profile.namespace,
-    conversationId: options.conversationId,
-    fromMessageId: options.fromMessageId,
-    toMessageId: messageId,
-    source: options.profile.source
-  });
+  if (options.fromMessageId) {
+    await enqueueMemoryMaintenanceIfNeeded(options.env, {
+      namespace: options.profile.namespace,
+      conversationId: options.conversationId,
+      fromMessageId: options.fromMessageId,
+      toMessageId: messageId,
+      source: options.profile.source
+    });
+  }
 
   await enqueueRetentionIfNeeded(options.env, options.profile.namespace);
 }
@@ -168,7 +177,8 @@ export function streamOpenAIWithTee(upstream: Response, options: StreamOpenAIOpt
   const state: StreamState = {
     assistantText: "",
     finishReason: null,
-    thinkingFilter: createThinkingFilterState()
+    thinkingFilter: createThinkingFilterState(),
+    hasToolCalls: false
   };
 
   void (async () => {
