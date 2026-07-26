@@ -38,7 +38,7 @@ import {
   readMessages,
   readNonNegativeInt,
   readNumber,
-  clampNumber,
+  isValidRange,
   readPositiveInt,
   readString,
   readStringArray,
@@ -483,6 +483,12 @@ export async function callTool(
     if (isV2Enabled(env)) return toolError("memory_create is deprecated in v2; use memory_upsert with fact_key");
     const content = readString(args.content);
     if (!content) return toolError("content is required");
+    if (args.importance != null && !isValidRange(args.importance, 0, 1)) {
+      return toolError("importance must be between 0 and 1");
+    }
+    if (args.confidence != null && !isValidRange(args.confidence, 0, 1)) {
+      return toolError("confidence must be between 0 and 1");
+    }
     let memory;
     try {
       memory = await createVectorMemory(env, {
@@ -490,8 +496,8 @@ export async function callTool(
         type: readString(args.type) || "note",
         content,
         summary: readString(args.summary) || null,
-        importance: clampNumber(args.importance, 0.5, 0, 1),
-        confidence: clampNumber(args.confidence, 0.8, 0, 1),
+        importance: readNumber(args.importance, 0.5),
+        confidence: readNumber(args.confidence, 0.8),
         pinned: readBoolean(args.pinned),
         tags: readStringArray(args.tags),
         source: readString(args.source) || "mcp",
@@ -720,13 +726,19 @@ export async function callTool(
     const content = readString(args.content);
     if (!factKey) return toolError("fact_key is required");
     if (!content) return toolError("content is required");
+    if (args.importance != null && !isValidRange(args.importance, 0, 1)) {
+      return toolError("importance must be between 0 and 1");
+    }
+    if (args.confidence != null && !isValidRange(args.confidence, 0, 1)) {
+      return toolError("confidence must be between 0 and 1");
+    }
     const result = await upsertMemoryByFactKey(env, {
       namespace: resolveNamespace(profile, args.namespace),
       factKey,
       content,
       type: readString(args.type) || "fact",
-      importance: clampNumber(args.importance, 0.6, 0, 1),
-      confidence: clampNumber(args.confidence, 0.8, 0, 1),
+      importance: readNumber(args.importance, 0.6),
+      confidence: readNumber(args.confidence, 0.8),
       tags: readStringArray(args.tags),
       source: readString(args.source) || "mcp",
       validAsOf: readString(args.valid_as_of),
@@ -747,7 +759,7 @@ export async function callTool(
       payloadJson: JSON.stringify({
         content,
         type: readString(args.type) || "fact",
-        importance: clampNumber(args.importance, 0.6, 0, 1),
+        importance: readNumber(args.importance, 0.6),
       }),
       reason: readString(args.reason) ?? null,
       roleId: readString(args.role_id) ?? null,
@@ -770,7 +782,7 @@ export async function callTool(
       payloadJson: JSON.stringify({
         content,
         type: readString(args.type),
-        importance: clampNumber(args.importance, 0.6, 0, 1),
+        importance: readNumber(args.importance, 0.6),
       }),
       reason: readString(args.reason) ?? null,
       // Role is NOT accepted from args — inherited from target at apply time

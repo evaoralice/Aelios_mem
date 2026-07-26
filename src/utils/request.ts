@@ -31,6 +31,10 @@ export function clampNumber(value: unknown, fallback: number, min: number, max: 
   return Math.min(Math.max(raw, min), max);
 }
 
+export function isValidRange(value: unknown, min: number, max: number): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+
 export function readBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
