@@ -59,10 +59,13 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `a9706bd` — debug: log tool_calls returned to client (temp, removed later)
 - `89d72d9` — fix: passthrough tool_call/tool_result in history — stop model repeating MCP calls
 - `60df148` — fix: preserve tool round order when request ends with tool result
+- `d05da20` — docs: update handover — round-4 tool_call passthrough, compress model info
+- `9d05677` — fix: stop duplicate user save on tool continuation + skip empty tool-call-only assistant save
+- `ba51200` — fix: stream persistStreamResult skips empty tool-call-only assistant saves
 
 > **规则：不自动推送。等用户检查确认后再推送。**
 
-**验证状态：** typecheck ✅ / vitest 222/222 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
+**验证状态：** typecheck ✅ / vitest 240/240 ✅ / verify-assembler 177/0 ✅ / verify-cache-strategy 15/0 ✅
 **本地验证命令：** `npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node scripts/verify-cache-strategy.mjs`
 
 ---
@@ -124,7 +127,7 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 
 **Bug：** `extractHistoryMessages` + `messageToOutput` 过滤了 `role=tool` 消息并丢弃了 assistant 的 `tool_calls` 字段。模型看不到自己的 MCP 调用历史 → 重复 upsert。
 
-**修复：**
+**修复（assembler 透传）：**
 - `assemble.ts` — `extractHistoryMessages` 保留 `role=tool`；只在请求以 user 结尾时拆分 current_user（tool result 结尾时不拆，保持原始顺序）
 - `blocks.ts` — `messageToOutput` 保留 `tool_calls`/`tool_call_id`；tool message 有 tool_call_id 时即使 content 空也保留；assistant 带 tool_calls 时 content 为 null 也保留
 - `types.ts` — 新增 `AssembledMessage` 接口（role 支持 tool）
@@ -132,7 +135,19 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `toAnthropic.ts` — tool 消息转 Anthropic tool_result block，assistant+tool_calls 转 tool_use block
 - `assemble.ts` — `extractLastUserMessage` 只在最后一条是 user 时返回，不再向后搜索
 
-**测试：** `test/assembler/toolCallPassthrough.test.ts`（8 项）
+**修复（非流式保存逻辑）：**
+- `chatCompletions.ts` — tool 续接请求（以 tool result 结尾）不调 `saveUserMessages`，避免重复保存 user message
+- `chatCompletions.ts` — 空 content + 有 tool_calls 的 assistant 响应不调 `saveAssistantMessage`（Anthropic + OpenAI 双路径）；`saveUsageLog` 和 `enqueueMemoryMaintenanceIfNeeded` 也跳过
+
+**修复（流式保存逻辑）：**
+- `streamOpenAI.ts` — `StreamState` 加 `hasToolCalls`；收到 `delta.tool_calls` 时标记；`persistStreamResult` 空 `assistantText` + 有 `tool_calls` 时直接 return
+- `streamAnthropic.ts` — `StreamState` 加 `hasToolCalls`；收到 `content_block_start tool_use` 时标记；`persistStreamResult` 同样跳过
+- 两个流式 `enqueueMemoryMaintenanceIfNeeded` 都加 `fromMessageId` 存在判断
+
+**测试：**
+- `test/assembler/toolCallPassthrough.test.ts`（12 项：OpenAI 8 + Anthropic 4）
+- `test/api/toolSaveLogic.test.ts`（4 项源码扫描）
+- `test/proxy/streamToolCallSave.test.ts`（10 项源码扫描：OpenAI 5 + Anthropic 5）
 
 ### 行为测试（12 项全部完成）
 
@@ -238,10 +253,14 @@ test/
   utils/
     roleContext.test.ts — 20 tests (Operit 标记解析)
   assembler/
-    toolCallPassthrough.test.ts — 8 tests (tool_call/tool_result 透传)
+    toolCallPassthrough.test.ts — 12 tests (tool_call/tool_result 透传 OpenAI+Anthropic)
+  api/
+    toolSaveLogic.test.ts — 4 tests (非流式保存逻辑源码扫描)
+  proxy/
+    streamToolCallSave.test.ts — 10 tests (流式保存逻辑源码扫描)
   phase1-4_5/        — 前一轮改造测试
 ```
-**当前总数：38 个测试文件，222 项测试全部通过**
+**当前总数：40 个测试文件，240 项测试全部通过**
 
 **运行命令：**
 ```bash
@@ -335,3 +354,5 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 24. **tool_call/tool_result 透传** — assembler 不再过滤 tool 消息；请求以 tool result 结尾时不拆分 current_user，保持 `user→assistant(tool_call)→tool(result)` 原始顺序
 25. **CF Gateway Custom Provider slug 必须全小写** — 大写 slug 会导致 URL 路径不匹配
 26. **压缩/重排/嵌入模型走 Workers AI** — 不经过 CF Gateway，用 `CLOUDFLARE_API_TOKEN` 认证；聊天/做梦模型走 CF Gateway
+27. **tool 续接请求不重复保存 user** — `saveUserMessages` 只在请求以 user 结尾时调用；tool result 结尾的续接请求跳过
+28. **空 content tool-call-only 响应不保存** — 非流式 + 流式（OpenAI + Anthropic）空 `assistantText` + 有 `tool_calls` 时不调 `saveAssistantMessage`/`saveUsageLog`/`enqueueMemoryMaintenance`
