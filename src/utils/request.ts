@@ -26,6 +26,11 @@ export function readNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+export function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const raw = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(Math.max(raw, min), max);
+}
+
 export function readBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
