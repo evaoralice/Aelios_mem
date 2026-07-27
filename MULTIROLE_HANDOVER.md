@@ -62,6 +62,9 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `d05da20` — docs: update handover — round-4 tool_call passthrough, compress model info
 - `9d05677` — fix: stop duplicate user save on tool continuation + skip empty tool-call-only assistant save
 - `ba51200` — fix: stream persistStreamResult skips empty tool-call-only assistant saves
+- `248cb1f` — docs: update handover — stream tool_call save fix, test counts 240/240
+- `4360579` — fix: clamp importance/confidence to 0-1 in MCP tools
+- `efb77b5` — fix: reject importance/confidence out of 0-1 range with error
 
 > **规则：不自动推送。等用户检查确认后再推送。**
 
@@ -148,6 +151,16 @@ Aelios 是 Cloudflare Workers 上的 AI 记忆代理系统。本次改造目标�
 - `test/assembler/toolCallPassthrough.test.ts`（12 项：OpenAI 8 + Anthropic 4）
 - `test/api/toolSaveLogic.test.ts`（4 项源码扫描）
 - `test/proxy/streamToolCallSave.test.ts`（10 项源码扫描：OpenAI 5 + Anthropic 5）
+
+### importance/confidence 范围校验（第五轮）
+
+**Bug：** MCP `memory_upsert` / `memory_create` 的 `importance` 和 `confidence` 没有校验上限，模型传 9 或 10 直接存入数据库，导致召回分数异常。
+
+**修复：**
+- MCP schema 加 `minimum: 0, maximum: 1` + description
+- 新增 `isValidRange(value, min, max)` 工具函数
+- `memory_upsert` / `memory_create` handler：超范围返回 `toolError("importance must be between 0 and 1")`，让模型重新调用
+- 不再静默 clamp，直接报错
 
 ### 行为测试（12 项全部完成）
 
@@ -356,3 +369,4 @@ npm run typecheck && npx vitest run && node scripts/verify-assembler.mjs && node
 26. **压缩/重排/嵌入模型走 Workers AI** — 不经过 CF Gateway，用 `CLOUDFLARE_API_TOKEN` 认证；聊天/做梦模型走 CF Gateway
 27. **tool 续接请求不重复保存 user** — `saveUserMessages` 只在请求以 user 结尾时调用；tool result 结尾的续接请求跳过
 28. **空 content tool-call-only 响应不保存** — 非流式 + 流式（OpenAI + Anthropic）空 `assistantText` + 有 `tool_calls` 时不调 `saveAssistantMessage`/`saveUsageLog`/`enqueueMemoryMaintenance`
+29. **importance/confidence 超范围报错** — MCP `memory_upsert`/`memory_create` 的 importance/confidence 超 0-1 范围直接返回 toolError，不静默 clamp，让模型重新调用
