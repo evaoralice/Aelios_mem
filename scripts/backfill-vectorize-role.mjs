@@ -16,8 +16,6 @@
  * 未回填的向量 role_scope 缺失，召回时视为 shared（向后兼容）。
  */
 
-import { sleep } from "./_sleep.mjs";
-
 const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID;
 const token = process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN;
 const d1Name = process.env.D1_DATABASE_NAME || "companion_memory_proxy";
