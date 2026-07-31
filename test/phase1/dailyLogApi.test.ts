@@ -117,7 +117,7 @@ describe("MCP daily_log_read", () => {
     expect(capturedArgs[2]).toBe(7);
   });
 
-  it("role_scope 参数透传到查询", async () => {
+  it("role_id 参数经 computeRoleScope 转换后透传到查询", async () => {
     let capturedArgs: any[] = [];
     const db = createMockD1({
       onQuery: (_sql, args) => {
@@ -129,7 +129,7 @@ describe("MCP daily_log_read", () => {
     const env = createMockEnv(db);
     await callTool(env, ctx, makeProfile(), {
       name: "daily_log_read",
-      arguments: { role_scope: "id:alice" },
+      arguments: { role_id: "alice" },
     } as any);
     expect(capturedArgs[1]).toBe("id:alice");
   });
@@ -218,7 +218,7 @@ describe("MCP daily_log_write", () => {
     expect(data.title).toBe("温柔的一天");
   });
 
-  it("role_scope 参数透传到写入", async () => {
+  it("role_id 参数经 computeRoleScope 转换后透传到写入", async () => {
     let capturedArgs: any[] = [];
     const db = createMockD1({
       onQuery: () => [],
@@ -227,7 +227,7 @@ describe("MCP daily_log_write", () => {
     const env = createMockEnv(db);
     await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "T", role_scope: "id:alice" },
+      arguments: { date: "2026-07-30", title: "T", role_id: "alice" },
     } as any);
     expect(capturedArgs[1]).toBe("id:alice");
   });

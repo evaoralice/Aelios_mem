@@ -456,7 +456,8 @@ function getTools(): Array<Record<string, unknown>> {
         properties: {
           date: { type: "string", description: "YYYY-MM-DD format. If omitted, returns recent logs." },
           limit: { type: "number", minimum: 1, maximum: 365, description: "Number of recent days to return (default 7, ignored if date is set)" },
-          role_scope: { type: "string", description: "Role scope filter (default: shared)" },
+          role_id: { type: "string", description: "Role ID to scope logs to a specific role" },
+          role_name: { type: "string", description: "Role name (fallback if no role_id)" },
           namespace: { type: "string" }
         }
       }
@@ -465,7 +466,7 @@ function getTools(): Array<Record<string, unknown>> {
       name: "daily_log_write",
       description:
         "Write or update a daily log entry for a specific date. " +
-        "If a log already exists for that date and role_scope, it will be overwritten. " +
+        "If a log already exists for that date and role, it will be overwritten. " +
         "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars.",
       inputSchema: {
         type: "object",
@@ -473,7 +474,8 @@ function getTools(): Array<Record<string, unknown>> {
           date: { type: "string", description: "YYYY-MM-DD format" },
           title: { type: "string", description: "Short title, <=12 chars" },
           summary: { type: "string", description: "Bullet-point summary, each line starts with '- ', <=800 chars" },
-          role_scope: { type: "string", description: "Role scope (default: shared)" },
+          role_id: { type: "string", description: "Role ID to scope log to a specific role" },
+          role_name: { type: "string", description: "Role name (fallback if no role_id)" },
           namespace: { type: "string" }
         },
         required: ["date", "title"]
@@ -933,7 +935,7 @@ export async function callTool(
   if (params.name === "daily_log_read") {
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
     const namespace = resolveNamespace(profile, args.namespace);
-    const roleScope = readString(args.role_scope) || "shared";
+    const roleScope = computeRoleScope(readString(args.role_id), readString(args.role_name));
     const date = readString(args.date);
     if (date) {
       const log = await getDailyLog(env.DB, { namespace, date, roleScope });
@@ -954,7 +956,7 @@ export async function callTool(
     if (title.length > 12) return toolError("title must be <= 12 characters");
     const summary = readString(args.summary) || "";
     if (summary.length > 800) return toolError("summary must be <= 800 characters");
-    const roleScope = readString(args.role_scope) || "shared";
+    const roleScope = computeRoleScope(readString(args.role_id), readString(args.role_name));
     const log = await upsertDailyLog(env.DB, { namespace, date, title, summary, roleScope });
     return textToolResult({ data: log });
   }
