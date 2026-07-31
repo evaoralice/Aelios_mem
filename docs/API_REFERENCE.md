@@ -1,7 +1,7 @@
 # Aelios API 接口参考
 
 > 所有接口的完整请求/响应格式。基于源码整理。
-> 最后更新：2026-07-27
+> 最后更新：2026-07-31
 
 ---
 
@@ -277,6 +277,28 @@ JSON-RPC 2.0 格式。
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
 | content | string | set 必填 | ≤1000 字 |
+
+#### daily_log_read
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:----:|------|
+| date | string | 否 | YYYY-MM-DD，传则返回单条；不传返回最近列表 |
+| limit | number | 否 | 1-365，默认 7（仅列表模式） |
+| role_id | string | 否 | 按角色筛选 |
+| role_name | string | 否 | role_id 的兜底 |
+
+#### daily_log_write
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:----:|------|
+| title | string | 是 | ≤12 字，已有日志时保留已有 title |
+| summary | string | 否 | `- ` 开头的要点，≤800 字 |
+| role_id | string | 否 | 按角色隔离 |
+| role_name | string | 否 | role_id 的兜底 |
+
+- 日期由服务端按 `DREAM_TIME_ZONE`（默认 Asia/Singapore）自动取当天，不接受客户端传入
+- 当天已有日志时，新 summary 追加到已有内容之后（不覆盖），合并后上限 2000 字
+- 建议在聊天结束时调用
 
 #### memory_context（系统专用，模型不应主动调用）
 

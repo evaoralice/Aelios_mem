@@ -80,20 +80,25 @@
 |------|------|:----:|------|
 | date | string | 否 | YYYY-MM-DD，指定日期查单条 |
 | limit | number | 否 | 不传 date 时返回最近 N 天（默认 7，最大 365） |
-| role_scope | string | 否 | 默认 shared |
+| role_id | string | 否 | 按角色筛选 |
+| role_name | string | 否 | role_id 的兜底 |
 | namespace | string | 否 | |
 
 #### `daily_log_write`
 
-写入或更新日记。需要 `memory:write` scope。
+追加当日日记。需要 `memory:write` scope。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
-| date | string | 是 | YYYY-MM-DD |
-| title | string | 是 | ≤12 字 |
-| summary | string | 否 | 分条列点，≤800 字 |
-| role_scope | string | 否 | 默认 shared |
+| title | string | 是 | ≤12 字，已有日志时保留已有 title |
+| summary | string | 否 | 分条列点（`- ` 开头），≤800 字 |
+| role_id | string | 否 | 按角色隔离 |
+| role_name | string | 否 | role_id 的兜底 |
 | namespace | string | 否 | |
+
+- 日期由服务端按 `DREAM_TIME_ZONE`（默认 Asia/Singapore）自动取当天，不接受客户端传入
+- 当天已有日志时，新 summary 追加到已有内容之后（不覆盖），合并后上限 2000 字
+- 建议在聊天结束时调用
 
 ---
 
