@@ -18,6 +18,8 @@ import {
   fetchMemoryLifecycleRows,
   getDigest,
   getDailyLog,
+  getRecentDailyLogs,
+  upsertDailyLog,
   getMemoryCandidateById,
   listGlossary,
   listLongtail,
@@ -820,4 +822,67 @@ export async function handleMemories(request: Request, env: Env, ctx: ExecutionC
   }
 
   return openAiError("Not found", 404);
+}
+
+// =====================================================================
+// Daily Log
+// =====================================================================
+
+export async function handleDailyLog(request: Request, env: Env): Promise<Response> {
+  const auth = await authenticate(request, env);
+  if (!auth.ok) return openAiError("Unauthorized", 401, "authentication_error");
+
+  const url = new URL(request.url);
+  const namespace = resolveNamespace(auth.profile, url.searchParams.get("namespace"));
+  const roleScope = readString(url.searchParams.get("role_scope")) || "shared";
+
+  if (request.method === "GET") {
+    const scopeError = requireScope(auth.profile, "memory:read");
+    if (scopeError) return scopeError;
+
+    const date = readString(url.searchParams.get("date"));
+    if (date) {
+      // single day
+      const log = await getDailyLog(env.DB, { namespace, date, roleScope });
+      if (!log) return openAiError("Not found", 404);
+      return json({ data: log });
+    }
+
+    // recent list
+    const limit = readPositiveInt(url.searchParams.get("limit"), 30, 365);
+    const logs = await getRecentDailyLogs(env.DB, { namespace, limit, roleScope });
+    return json({ data: logs });
+  }
+
+  if (request.method === "POST") {
+    const scopeError = requireScope(auth.profile, "memory:write");
+    if (scopeError) return scopeError;
+
+    const body = await readJsonObject(request);
+    if (!body) return openAiError("Request body must be a JSON object", 400);
+
+    const date = readString(body.date);
+    if (!date) return openAiError("date is required (YYYY-MM-DD)", 400);
+
+    const title = readString(body.title);
+    if (!title) return openAiError("title is required", 400);
+    if (title.length > 12) return openAiError("title must be <= 12 characters", 400);
+
+    const summary = readString(body.summary) || "";
+    if (summary.length > 800) return openAiError("summary must be <= 800 characters", 400);
+
+    const bodyRoleScope = readString(body.role_scope) || "shared";
+
+    const log = await upsertDailyLog(env.DB, {
+      namespace,
+      date,
+      title,
+      summary,
+      roleScope: bodyRoleScope,
+    });
+
+    return json({ data: log });
+  }
+
+  return openAiError("Method not allowed", 405);
 }

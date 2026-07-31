@@ -62,6 +62,7 @@ export interface Env {
   DREAM_MEMORY_CONTEXT_LIMIT?: string;
   DREAM_EXCERPT_LIMIT?: string;
   DREAM_TIME_ZONE?: string;
+  DREAM_WRITE_DAILY_LOG?: string;
   EXTRACT_MODEL?: string;
   EXTRACT_MAX_MESSAGES?: string;
   EXTRACT_MAX_RUNS?: string;

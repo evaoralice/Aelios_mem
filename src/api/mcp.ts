@@ -9,9 +9,12 @@ import {
   createBaselineChangelogEntry,
   deleteMemoryV2,
   fetchMemoryLifecycleRows,
+  getDailyLog,
   getDigest,
+  getRecentDailyLogs,
   getPreciousById,
   supersedeMemory,
+  upsertDailyLog,
   upsertDigest,
   upsertGlossary,
   upsertMemoryByFactKey,
@@ -440,6 +443,40 @@ function getTools(): Array<Record<string, unknown>> {
           namespace: { type: "string" }
         },
         required: ["content"]
+      }
+    },
+    {
+      name: "daily_log_read",
+      description:
+        "Read daily logs. If date is provided, returns that single day's log. " +
+        "Otherwise returns the most recent logs (default 7 days). " +
+        "Use role_id/role_name to scope to a specific role.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "YYYY-MM-DD format. If omitted, returns recent logs." },
+          limit: { type: "number", minimum: 1, maximum: 365, description: "Number of recent days to return (default 7, ignored if date is set)" },
+          role_scope: { type: "string", description: "Role scope filter (default: shared)" },
+          namespace: { type: "string" }
+        }
+      }
+    },
+    {
+      name: "daily_log_write",
+      description:
+        "Write or update a daily log entry for a specific date. " +
+        "If a log already exists for that date and role_scope, it will be overwritten. " +
+        "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "YYYY-MM-DD format" },
+          title: { type: "string", description: "Short title, <=12 chars" },
+          summary: { type: "string", description: "Bullet-point summary, each line starts with '- ', <=800 chars" },
+          role_scope: { type: "string", description: "Role scope (default: shared)" },
+          namespace: { type: "string" }
+        },
+        required: ["date", "title"]
       }
     },
     {
@@ -891,6 +928,35 @@ export async function callTool(
       content
     });
     return textToolResult({ data: row });
+  }
+
+  if (params.name === "daily_log_read") {
+    if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
+    const namespace = resolveNamespace(profile, args.namespace);
+    const roleScope = readString(args.role_scope) || "shared";
+    const date = readString(args.date);
+    if (date) {
+      const log = await getDailyLog(env.DB, { namespace, date, roleScope });
+      return textToolResult({ data: log ?? { message: "No log found for this date" } });
+    }
+    const limit = readPositiveInt(args.limit, 7, 365);
+    const logs = await getRecentDailyLogs(env.DB, { namespace, limit, roleScope });
+    return textToolResult({ data: logs });
+  }
+
+  if (params.name === "daily_log_write") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const namespace = resolveNamespace(profile, args.namespace);
+    const date = readString(args.date);
+    if (!date) return toolError("date is required (YYYY-MM-DD)");
+    const title = readString(args.title);
+    if (!title) return toolError("title is required");
+    if (title.length > 12) return toolError("title must be <= 12 characters");
+    const summary = readString(args.summary) || "";
+    if (summary.length > 800) return toolError("summary must be <= 800 characters");
+    const roleScope = readString(args.role_scope) || "shared";
+    const log = await upsertDailyLog(env.DB, { namespace, date, title, summary, roleScope });
+    return textToolResult({ data: log });
   }
 
   if (params.name === "memory_context") {

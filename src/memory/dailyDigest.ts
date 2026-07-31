@@ -143,6 +143,12 @@ function isDreamEnabled(env: Env): boolean {
   return env.ENABLE_DAILY_MEMORY_DIGEST !== "false";
 }
 
+// dream 是否自动写 daily_log。默认 true（保留原行为）；设 "false" 时跳过写入，
+// 改由模型/前端通过 /v1/daily_log 或 MCP daily_log_write 主动写，避免与并发写入竞态。
+function shouldDreamWriteDailyLog(env: Env): boolean {
+  return env.DREAM_WRITE_DAILY_LOG !== "false";
+}
+
 function readDreamStrategy(env: Env): "legacy" | "upsert" | "review" {
   const raw = env.DREAM_STRATEGY;
   if (raw === "legacy" || raw === "review") return raw;
@@ -1265,7 +1271,7 @@ async function applyDreamV2(
       }
       seenWriteScopes.add(scope);
       // P1-3: write per-role daily_log
-      if (group.daily_log && (group.daily_log.title || group.daily_log.summary)) {
+      if (shouldDreamWriteDailyLog(env) && group.daily_log && (group.daily_log.title || group.daily_log.summary)) {
         await upsertDailyLog(env.DB, {
           namespace,
           date: dateLabel,
@@ -1278,13 +1284,15 @@ async function applyDreamV2(
     }
   } else if (!digest.groups && digest.summary) {
     // Non-role path: write shared daily_log (legacy behavior)
-    await upsertDailyLog(env.DB, {
-      namespace,
-      date: dateLabel,
-      title: digest.title ?? dateLabel,
-      summary: digest.summary,
-      roleScope: "shared",
-    });
+    if (shouldDreamWriteDailyLog(env)) {
+      await upsertDailyLog(env.DB, {
+        namespace,
+        date: dateLabel,
+        title: digest.title ?? dateLabel,
+        summary: digest.summary,
+        roleScope: "shared",
+      });
+    }
   }
 
   // baseline 不再由做梦自动生成 — legacy baseline_texts 路径已移除

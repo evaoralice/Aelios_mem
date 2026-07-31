@@ -5,6 +5,7 @@ import { handleCacheHealth, handleVectorHealth, handleVectorReindex } from "./ap
 import { handleChatCompletions } from "./api/chatCompletions";
 import { handleGuideDogChatCompletions } from "./api/guideDog";
 import {
+  handleDailyLog,
   handleGlossaryApi,
   handleIngestMessagesApi,
   handleMemories,
@@ -89,6 +90,10 @@ export default {
 
     if (url.pathname === "/v1/memory" || url.pathname.startsWith("/v1/memory/")) {
       return handleMemories(request, env, ctx);
+    }
+
+    if (url.pathname === "/v1/daily_log" || url.pathname === "/v1/daily-log") {
+      return handleDailyLog(request, env);
     }
 
     if (url.pathname === "/v1/memory_boot") {
