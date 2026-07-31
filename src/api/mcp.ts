@@ -465,20 +465,20 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "daily_log_write",
       description:
-        "Write or update a daily log entry for a specific date. " +
-        "If a log already exists for that date and role, it will be overwritten. " +
-        "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars.",
+        "Append to today's daily log. Date is determined by the server (Asia/Singapore timezone). " +
+        "If a log already exists for today, the new summary lines are appended (not overwritten). " +
+        "Call this near the end of a conversation to record what was discussed. " +
+        "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars total.",
       inputSchema: {
         type: "object",
         properties: {
-          date: { type: "string", description: "YYYY-MM-DD format" },
-          title: { type: "string", description: "Short title, <=12 chars" },
-          summary: { type: "string", description: "Bullet-point summary, each line starts with '- ', <=800 chars" },
+          title: { type: "string", description: "Short title, <=12 chars. Ignored if today's log already has a title." },
+          summary: { type: "string", description: "Bullet-point summary to append, each line starts with '- ', <=800 chars" },
           role_id: { type: "string", description: "Role ID to scope log to a specific role" },
           role_name: { type: "string", description: "Role name (fallback if no role_id)" },
           namespace: { type: "string" }
         },
-        required: ["date", "title"]
+        required: ["title"]
       }
     },
     {
@@ -949,15 +949,35 @@ export async function callTool(
   if (params.name === "daily_log_write") {
     if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
     const namespace = resolveNamespace(profile, args.namespace);
-    const date = readString(args.date);
-    if (!date) return toolError("date is required (YYYY-MM-DD)");
+    const tz = readString(env.DREAM_TIME_ZONE) || "Asia/Singapore";
+    const date = new Date().toLocaleDateString("sv-SE", { timeZone: tz }); // YYYY-MM-DD
     const title = readString(args.title);
     if (!title) return toolError("title is required");
     if (title.length > 12) return toolError("title must be <= 12 characters");
-    const summary = readString(args.summary) || "";
-    if (summary.length > 800) return toolError("summary must be <= 800 characters");
+    const newSummary = readString(args.summary) || "";
+    if (newSummary.length > 800) return toolError("summary must be <= 800 characters");
     const roleScope = computeRoleScope(readString(args.role_id), readString(args.role_name));
-    const log = await upsertDailyLog(env.DB, { namespace, date, title, summary, roleScope });
+
+    // Read existing log for today; append if exists
+    const existing = await getDailyLog(env.DB, { namespace, date, roleScope });
+    let mergedTitle = title;
+    let mergedSummary = newSummary;
+    if (existing) {
+      // Keep existing title if present
+      mergedTitle = existing.title || title;
+      // Append new summary lines to existing
+      const existingSummary = (existing.summary || "").trim();
+      const appendSummary = newSummary.trim();
+      if (existingSummary && appendSummary) {
+        mergedSummary = existingSummary + "\n" + appendSummary;
+      } else {
+        mergedSummary = existingSummary || appendSummary;
+      }
+    }
+
+    if (mergedSummary.length > 2000) return toolError("merged summary exceeds 2000 characters; today's log is getting too long");
+
+    const log = await upsertDailyLog(env.DB, { namespace, date, title: mergedTitle, summary: mergedSummary, roleScope });
     return textToolResult({ data: log });
   }
 

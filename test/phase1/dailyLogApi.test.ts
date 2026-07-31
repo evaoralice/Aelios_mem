@@ -142,21 +142,10 @@ describe("MCP daily_log_write", () => {
     const profile = makeProfile(["memory:read"]);
     const result = await callTool(env, ctx, profile, {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "T" },
-    } as any);
-    expect((result as any).isError).toBe(true);
-    expect((result as any).content[0].text).toMatch(/memory:write/);
-  });
-
-  it("缺 date 返回错误", async () => {
-    const db = createMockD1({ onQuery: () => [], onRun: () => {} });
-    const env = createMockEnv(db);
-    const result = await callTool(env, ctx, makeProfile(), {
-      name: "daily_log_write",
       arguments: { title: "T" },
     } as any);
     expect((result as any).isError).toBe(true);
-    expect((result as any).content[0].text).toMatch(/date is required/i);
+    expect((result as any).content[0].text).toMatch(/memory:write/);
   });
 
   it("缺 title 返回错误", async () => {
@@ -164,7 +153,7 @@ describe("MCP daily_log_write", () => {
     const env = createMockEnv(db);
     const result = await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30" },
+      arguments: {},
     } as any);
     expect((result as any).isError).toBe(true);
     expect((result as any).content[0].text).toMatch(/title is required/i);
@@ -175,7 +164,7 @@ describe("MCP daily_log_write", () => {
     const env = createMockEnv(db);
     const result = await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "这是一个超过十二字的标题测试用例" },
+      arguments: { title: "这是一个超过十二字的标题测试用例" },
     } as any);
     expect((result as any).isError).toBe(true);
     expect((result as any).content[0].text).toMatch(/<= 12 characters/i);
@@ -187,17 +176,17 @@ describe("MCP daily_log_write", () => {
     const longSummary = "- ".repeat(500);
     const result = await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "T", summary: longSummary },
+      arguments: { title: "T", summary: longSummary },
     } as any);
     expect((result as any).isError).toBe(true);
     expect((result as any).content[0].text).toMatch(/<= 800 characters/i);
   });
 
-  it("正常写入：返回 upsert 结果", async () => {
+  it("正常写入（无已有日志）：日期由服务端生成", async () => {
     let capturedSql = "";
     let capturedArgs: any[] = [];
     const db = createMockD1({
-      onQuery: () => [],
+      onQuery: () => [],  // no existing log
       onRun: (sql, args) => {
         capturedSql = sql;
         capturedArgs = args;
@@ -206,16 +195,45 @@ describe("MCP daily_log_write", () => {
     const env = createMockEnv(db);
     const result = await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "温柔的一天", summary: "- 聊天\n- 散步" },
+      arguments: { title: "温柔的一天", summary: "- 聊天\n- 散步" },
     } as any);
     expect((result as any).isError).toBeFalsy();
     expect(capturedSql).toContain("INSERT INTO daily_log");
-    expect(capturedArgs[0]).toBe("test");
-    expect(capturedArgs[1]).toBe("shared");
-    expect(capturedArgs[2]).toBe("2026-07-30");
+    // date is server-generated, should be today in YYYY-MM-DD format
+    expect(capturedArgs[2]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(capturedArgs[3]).toBe("温柔的一天");
     const data = (result as any).structuredContent?.data;
     expect(data.title).toBe("温柔的一天");
+    expect(data.summary).toBe("- 聊天\n- 散步");
+  });
+
+  it("已有日志时追加 summary，保留已有 title", async () => {
+    const db = createMockD1({
+      onQuery: (sql) => {
+        // Return existing log on SELECT
+        if (sql.includes("FROM daily_log") && sql.includes("date = ?")) {
+          return [{
+            namespace: "test", role_scope: "shared",
+            date: "2026-07-31", title: "早上好",
+            summary: "- 讨论了备份方案", updated_at: "u",
+          }];
+        }
+        return [];
+      },
+      onRun: () => {},
+    });
+    const env = createMockEnv(db);
+    const result = await callTool(env, ctx, makeProfile(), {
+      name: "daily_log_write",
+      arguments: { title: "新标题", summary: "- 整理了工作区" },
+    } as any);
+    expect((result as any).isError).toBeFalsy();
+    const data = (result as any).structuredContent?.data;
+    // Existing title preserved
+    expect(data.title).toBe("早上好");
+    // Summary appended
+    expect(data.summary).toContain("- 讨论了备份方案");
+    expect(data.summary).toContain("- 整理了工作区");
   });
 
   it("role_id 参数经 computeRoleScope 转换后透传到写入", async () => {
@@ -227,7 +245,7 @@ describe("MCP daily_log_write", () => {
     const env = createMockEnv(db);
     await callTool(env, ctx, makeProfile(), {
       name: "daily_log_write",
-      arguments: { date: "2026-07-30", title: "T", role_id: "alice" },
+      arguments: { title: "T", role_id: "alice" },
     } as any);
     expect(capturedArgs[1]).toBe("id:alice");
   });
