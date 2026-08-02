@@ -29,7 +29,8 @@ binding = "AI"
 # Visible model knobs. These are intentionally in wrangler.toml so they show
 # up in Cloudflare Variables and can be changed without touching code.
 PUBLIC_MODEL_NAME = "companion"
-CHAT_MODEL = "custom-zenmux3/claude-opus-4-6"
+# CHAT_MODEL 由 Worker 现有配置持有（keep_vars 保留），不写入 [vars]
+# 避免代码部署覆盖模型配置；如需修改请直接改 Cloudflare Dashboard 变量。
 MEMORY_FILTER_MODEL = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 MEMORY_FILTER_MAX_CANDIDATES = "12"
 MEMORY_FILTER_MAX_OUTPUT = "5"

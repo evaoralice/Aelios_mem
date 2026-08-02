@@ -190,7 +190,7 @@ anthropic/claude*          → Anthropic native (/anthropic/v1/messages)
   ├─ 显式 cache_control 锚定稳定 system 前缀（persona_pinned / boot_stable / client_system 稳定段）
   ├─ 多断点策略：system 锚 + boot_stable 锚 + tail 锚，≤4 个标记
   ├─ dynamic_memory_patch 通过伪造 tool call 注入（`MEMORY_INJECTION_MODE=toolcall`）或追加到 user 块（默认 text 模式），不打 cache_control
-  └─ rolling user cache 默认开，automatic cache 默认关
+  └─ rolling user cache 默认关，automatic cache 默认开
 custom-provider/claude-*   → Provider native (/custom-provider/messages)
 其他                       → OpenAI compat (/compat/chat/completions)
 workers-ai/@cf/...         → env.AI.run（不走 AI Gateway）
@@ -365,7 +365,7 @@ hard delete: deleted/superseded/expired 超 365 天 → 先删 Vectorize 再删 
 | `ANTHROPIC_CACHE_ENABLED` | `true` | prompt cache 开关 |
 | `ANTHROPIC_CACHE_TTL` | `5m` | `5m` / `1h` |
 | `ANTHROPIC_AUTO_CACHE_ENABLED` | `true` | 顶层 automatic cache |
-| `ANTHROPIC_ROLLING_CACHE_ENABLED` | `true` | 滚动打点 |
+| `ANTHROPIC_ROLLING_CACHE_ENABLED` | `false` | 滚动打点 |
 | `ANTHROPIC_ROLLING_CACHE_WINDOW_SIZE` | `20` | 历史窗口 |
 | `ANTHROPIC_CACHE_USER_ID` | 空 | 多客户端 cache 隔离用 `metadata.user_id` |
 | `ANTHROPIC_THINKING_ENABLED` | `false` | 深度思考 |
@@ -414,7 +414,7 @@ hard delete: deleted/superseded/expired 超 365 天 → 先删 Vectorize 再删 
 ```bash
 npm install
 npm run deploy:cloudflare   # 建库 + 升级 + 部署
-npm run worker:test         # 主测试套件（177 项）
+npm run worker:test         # 主测试套件（256 项）
 node scripts/verify-extract-pipeline.mjs   # 4h 抽取管线行为测试
 node scripts/verify-cache-strategy.mjs     # Claude 缓存断点策略（15 项）
 npx tsc --noEmit            # 类型检查
