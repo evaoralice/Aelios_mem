@@ -49,97 +49,107 @@ async function runDailyMemoryDigestBatches(env: Env, namespace: string): Promise
   return results;
 }
 
+async function routeFetch(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  url: URL
+): Promise<Response> {
+  if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/memory-admin")) {
+    return handleAdmin();
+  }
+
+  if (request.method === "GET" && url.pathname === "/health") {
+    return handleHealth(env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/models") {
+    return handleModels(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+    return handleChatCompletions(request, env, ctx);
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/v1/guide-dog/chat/completions" || url.pathname === "/guide-dog/v1/chat/completions")
+  ) {
+    return handleGuideDogChatCompletions(request, env);
+  }
+
+  if (url.pathname === "/mcp" || url.pathname === "/memory-mcp") {
+    return handleMcp(request, env, ctx);
+  }
+
+  if (url.pathname.startsWith("/v1/memories")) {
+    return handleMemories(request, env, ctx);
+  }
+
+  if (url.pathname === "/api/memories/export") {
+    return handleMemories(request, env, ctx);
+  }
+
+  if (url.pathname === "/v1/memory" || url.pathname.startsWith("/v1/memory/")) {
+    return handleMemories(request, env, ctx);
+  }
+
+  if (url.pathname === "/v1/daily_log" || url.pathname === "/v1/daily-log") {
+    return handleDailyLog(request, env);
+  }
+
+  if (url.pathname === "/v1/memory_boot") {
+    return handleMemoryBoot(request, env);
+  }
+
+  if (url.pathname === "/v1/precious" || url.pathname.startsWith("/v1/precious/")) {
+    return handlePrecious(request, env);
+  }
+
+  if (url.pathname === "/v1/glossary" || url.pathname.startsWith("/v1/glossary/")) {
+    return handleGlossaryApi(request, env);
+  }
+
+  if (url.pathname === "/v1/candidates" || url.pathname.startsWith("/v1/candidates/")) {
+    return handleMemoryCandidates(request, env);
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/v1/ingest/messages" || url.pathname === "/v1/messages/ingest")
+  ) {
+    return handleIngestMessagesApi(request, env, ctx);
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/search/memories") {
+    return handleSearchMemoriesApi(request, env);
+  }
+
+  if (url.pathname.startsWith("/v1/cache/")) {
+    return handleCache(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/debug/cache_health") {
+    return handleCacheHealth(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/debug/vector_health") {
+    return handleVectorHealth(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/debug/vector_reindex") {
+    return handleVectorReindex(request, env);
+  }
+
+  return openAiError("Not found", 404);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-
-    if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/memory-admin")) {
-      return handleAdmin();
-    }
-
-    if (request.method === "GET" && url.pathname === "/health") {
-      return handleHealth(env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/v1/models") {
-      return handleModels(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
-      return handleChatCompletions(request, env, ctx);
-    }
-
-    if (
-      request.method === "POST" &&
-      (url.pathname === "/v1/guide-dog/chat/completions" || url.pathname === "/guide-dog/v1/chat/completions")
-    ) {
-      return handleGuideDogChatCompletions(request, env);
-    }
-
-    if (url.pathname === "/mcp" || url.pathname === "/memory-mcp") {
-      return handleMcp(request, env, ctx);
-    }
-
-    if (url.pathname.startsWith("/v1/memories")) {
-      return handleMemories(request, env, ctx);
-    }
-
-    if (url.pathname === "/api/memories/export") {
-      return handleMemories(request, env, ctx);
-    }
-
-    if (url.pathname === "/v1/memory" || url.pathname.startsWith("/v1/memory/")) {
-      return handleMemories(request, env, ctx);
-    }
-
-    if (url.pathname === "/v1/daily_log" || url.pathname === "/v1/daily-log") {
-      return handleDailyLog(request, env);
-    }
-
-    if (url.pathname === "/v1/memory_boot") {
-      return handleMemoryBoot(request, env);
-    }
-
-    if (url.pathname === "/v1/precious" || url.pathname.startsWith("/v1/precious/")) {
-      return handlePrecious(request, env);
-    }
-
-    if (url.pathname === "/v1/glossary" || url.pathname.startsWith("/v1/glossary/")) {
-      return handleGlossaryApi(request, env);
-    }
-
-    if (url.pathname === "/v1/candidates" || url.pathname.startsWith("/v1/candidates/")) {
-      return handleMemoryCandidates(request, env);
-    }
-
-    if (
-      request.method === "POST" &&
-      (url.pathname === "/v1/ingest/messages" || url.pathname === "/v1/messages/ingest")
-    ) {
-      return handleIngestMessagesApi(request, env, ctx);
-    }
-
-    if (request.method === "POST" && url.pathname === "/v1/search/memories") {
-      return handleSearchMemoriesApi(request, env);
-    }
-
-    if (url.pathname.startsWith("/v1/cache/")) {
-      return handleCache(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/v1/debug/cache_health") {
-      return handleCacheHealth(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/v1/debug/vector_health") {
-      return handleVectorHealth(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/v1/debug/vector_reindex") {
-      return handleVectorReindex(request, env);
-    }
-
-    return openAiError("Not found", 404);
+    const response = await routeFetch(request, env, ctx, url);
+    response.headers.set("x-robots-tag", "noindex, nofollow");
+    return response;
   },
 
   async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
