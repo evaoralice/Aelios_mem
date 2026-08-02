@@ -437,7 +437,7 @@ npm run vectorize:clean:llm
 
 ## License
 
-MIT
+MIT.
 
 ## 交流与反馈
 
