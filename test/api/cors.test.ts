@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createMockEnv } from "../helpers/d1-mock";
+import { createMockD1, createMockEnv } from "../helpers/d1-mock";
 
 // 路由会命中 /health，需要 mock handleHealth 返回的依赖（db 等）。
 // 这里直接测 fetch 入口的行为，不依赖具体 handler 逻辑。
@@ -33,7 +33,8 @@ async function fetchWithEnv(
   request: Request,
   envOverrides: Record<string, string> = {}
 ): Promise<Response> {
-  const env = { ...createMockEnv(), ...envOverrides } as any;
+  const db = createMockD1();
+  const env = { ...createMockEnv(db), ...envOverrides } as any;
   const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as any;
   return worker.fetch!(request, env, ctx);
 }
