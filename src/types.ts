@@ -114,6 +114,10 @@ export interface Env {
   ENABLE_CACHE_API?: string;
   CACHE_DEFAULT_TTL_SECONDS?: string;
   CACHE_MAX_VALUE_BYTES?: string;
+  // CORS 跨域白名单，逗号分隔的精确 Origin 列表，例如：
+  // "https://memoria.pages.dev,https://memoria.example.com"
+  // 不配 = 保持现状（不返回任何 CORS 头，浏览器跨域请求全被拦）
+  CORS_ALLOW_ORIGINS?: string;
 }
 
 export interface MemoryMaintenanceQueueMessage {

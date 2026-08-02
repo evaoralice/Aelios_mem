@@ -49,6 +49,43 @@ async function runDailyMemoryDigestBatches(env: Env, namespace: string): Promise
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// CORS 白名单中间件
+// ---------------------------------------------------------------------------
+// 不配 CORS_ALLOW_ORIGINS = 保持现状（不返回任何 CORS 头，浏览器跨域全拦）。
+// 配置后：白名单内 Origin 的请求加 Access-Control-Allow-Origin 等头；
+// OPTIONS 预检直接返回 204 + CORS 头，不进业务路由。
+// 匹配采用精确等值比对（规范化后），避免 includes() 被绕过。
+
+const CORS_ALLOW_METHODS = "GET, POST, PATCH, PUT, DELETE, OPTIONS";
+const CORS_ALLOW_HEADERS = "Authorization, Content-Type, X-API-Key";
+
+function parseAllowedOrigins(env: Env): Set<string> {
+  const raw = env.CORS_ALLOW_ORIGINS?.trim();
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+}
+
+function isOriginAllowed(origin: string | null, allowed: Set<string>): boolean {
+  if (!origin || allowed.size === 0) return false;
+  return allowed.has(origin);
+}
+
+function buildCorsHeaders(origin: string): Record<string, string> {
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": CORS_ALLOW_METHODS,
+    "access-control-allow-headers": CORS_ALLOW_HEADERS,
+    "access-control-max-age": "86400",
+    vary: "Origin",
+  };
+}
+
 async function routeFetch(
   request: Request,
   env: Env,
@@ -147,8 +184,30 @@ async function routeFetch(
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const allowed = parseAllowedOrigins(env);
+    const origin = request.headers.get("origin");
+
+    // CORS 未配置 = 保持现状，不处理 OPTIONS、不加任何 CORS 头。
+    if (allowed.size > 0) {
+      if (request.method === "OPTIONS") {
+        if (!isOriginAllowed(origin, allowed)) {
+          return new Response(null, { status: 204 });
+        }
+        return new Response(null, {
+          status: 204,
+          headers: buildCorsHeaders(origin as string),
+        });
+      }
+    }
+
     const response = await routeFetch(request, env, ctx, url);
     response.headers.set("x-robots-tag", "noindex, nofollow");
+
+    if (allowed.size > 0 && isOriginAllowed(origin, allowed)) {
+      response.headers.set("access-control-allow-origin", origin as string);
+      response.headers.set("vary", "Origin");
+    }
+
     return response;
   },
 
