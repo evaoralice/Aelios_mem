@@ -73,6 +73,7 @@ export interface PreciousRow {
   pinned: number;
   created_at: string;
   last_injected_at: string | null;
+  status: string;
 }
 
 export interface CreatePreciousInput {
@@ -93,13 +94,14 @@ export async function createPrecious(db: D1Database, input: CreatePreciousInput)
     source: input.source ?? "human",
     pinned: 1,
     created_at: now,
-    last_injected_at: null
+    last_injected_at: null,
+    status: "active"
   };
 
   await db
     .prepare(
-      `INSERT INTO precious (id, namespace, content, context_message_ids, source, pinned, created_at, last_injected_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO precious (id, namespace, content, context_message_ids, source, pinned, created_at, last_injected_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -121,7 +123,7 @@ export async function getPreciousById(
   input: { namespace: string; id: string }
 ): Promise<PreciousRow | null> {
   const row = await db
-    .prepare("SELECT * FROM precious WHERE namespace = ? AND id = ?")
+    .prepare("SELECT * FROM precious WHERE namespace = ? AND id = ? AND status = 'active'")
     .bind(input.namespace, input.id)
     .first<PreciousRow>();
   return row ?? null;
@@ -134,7 +136,7 @@ export async function listPrecious(
   const limit = Math.min(Math.max(Math.floor(input.limit), 1), 200);
   const result = await db
     .prepare(
-      `SELECT * FROM precious WHERE namespace = ? AND pinned = 1
+      `SELECT * FROM precious WHERE namespace = ? AND pinned = 1 AND status = 'active'
        ORDER BY created_at DESC LIMIT ?`
     )
     .bind(input.namespace, limit)
@@ -147,7 +149,7 @@ export async function deletePrecious(
   input: { namespace: string; id: string }
 ): Promise<boolean> {
   const r = await db
-    .prepare("DELETE FROM precious WHERE namespace = ? AND id = ?")
+    .prepare("UPDATE precious SET status = 'deleted' WHERE namespace = ? AND id = ? AND status = 'active'")
     .bind(input.namespace, input.id)
     .run();
   return (r.meta?.changes ?? 0) > 0;
