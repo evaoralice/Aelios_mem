@@ -1,5 +1,5 @@
 import { handleAdmin } from "./api/admin";
-import { handleBaselineChangelogApply, handleBaselineChangelogConflict, handleBaselineChangelogList } from "./api/baseline";
+import { handleBaselineChangelogApply, handleBaselineChangelogConflict, handleBaselineChangelogList, handleBaselineChangelogReopen } from "./api/baseline";
 import { handleHealth } from "./api/health";
 import { handleCache } from "./api/cache";
 import { handleCacheHealth, handleVectorHealth, handleVectorReindex } from "./api/debug";
@@ -172,6 +172,15 @@ async function routeFetch(
   ) {
     const id = url.pathname.slice("/v1/baseline_changelog/".length, -"/conflict".length);
     return handleBaselineChangelogConflict(request, env, id);
+  }
+
+  if (
+    request.method === "POST" &&
+    url.pathname.startsWith("/v1/baseline_changelog/") &&
+    url.pathname.endsWith("/reopen")
+  ) {
+    const id = url.pathname.slice("/v1/baseline_changelog/".length, -"/reopen".length);
+    return handleBaselineChangelogReopen(request, env, id);
   }
 
   if (

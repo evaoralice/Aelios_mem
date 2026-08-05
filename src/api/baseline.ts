@@ -5,6 +5,7 @@ import {
   listBaselineChangelog,
   markBaselineChangelogApplied,
   markBaselineChangelogConflict,
+  reopenBaselineChangelog,
   type BaselineChangelogRow,
 } from "../db/v2";
 import type { Env } from "../types";
@@ -122,5 +123,31 @@ export async function handleBaselineChangelogConflict(request: Request, env: Env
 
   return json({
     data: { id, status: "conflict", error_message: reason },
+  });
+}
+
+// POST /v1/baseline_changelog/:id/reopen
+// conflict → pending 回退，让做梦流程重新处理。用于 admin 标错 conflict 时恢复。
+export async function handleBaselineChangelogReopen(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await authenticate(request, env);
+  if (!auth.ok) return openAiError("Unauthorized", 401);
+  const scopeError = requireScope(auth.profile, "memory:write");
+  if (scopeError) return scopeError;
+
+  if (!id) return openAiError("Missing changelog id", 400);
+
+  const url = new URL(request.url);
+  const namespace = resolveNamespace(auth.profile, url.searchParams.get("namespace"));
+
+  const row = await getBaselineChangelogById(env.DB, { namespace, id });
+  if (!row) return openAiError("Baseline changelog entry not found", 404);
+  if (row.status !== "conflict") {
+    return openAiError(`Entry is ${row.status}, only conflict entries can be reopened`, 409);
+  }
+
+  await reopenBaselineChangelog(env.DB, { id });
+
+  return json({
+    data: { id, status: "pending" },
   });
 }

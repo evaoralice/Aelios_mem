@@ -162,4 +162,37 @@ describe("baseline_changelog API", () => {
     const res = await worker.fetch!(makeAuthedRequest("POST", "/v1/baseline_changelog/bch_001/apply", "wrong"), env, ctx);
     expect(res.status).toBe(401);
   });
+
+  it("POST /reopen 把 conflict 改回 pending", async () => {
+    const { env, ctx } = await fetchWithDb((sql) => {
+      if (sql.includes("SELECT * FROM baseline_changelog")) return [{ ...SAMPLE_ROW, status: "conflict", error_message: "旧冲突" }];
+      return [];
+    });
+    const res = await worker.fetch!(makeAuthedRequest("POST", "/v1/baseline_changelog/bch_001/reopen"), env, ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.data.status).toBe("pending");
+  });
+
+  it("POST /reopen 非 conflict 状态 → 409", async () => {
+    const { env, ctx } = await fetchWithDb((sql) => {
+      if (sql.includes("SELECT * FROM baseline_changelog")) return [{ ...SAMPLE_ROW, status: "pending" }];
+      return [];
+    });
+    const res = await worker.fetch!(makeAuthedRequest("POST", "/v1/baseline_changelog/bch_001/reopen"), env, ctx);
+    expect(res.status).toBe(409);
+  });
+
+  it("POST /reopen 不存在的 id → 404", async () => {
+    const { env, ctx } = await fetchWithDb(() => []);
+    const res = await worker.fetch!(makeAuthedRequest("POST", "/v1/baseline_changelog/bch_none/reopen"), env, ctx);
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /reopen 无 Authorization → 401", async () => {
+    const { env, ctx } = await fetchWithDb(() => []);
+    const req = new Request("https://aelios.test/v1/baseline_changelog/bch_001/reopen", { method: "POST" });
+    const res = await worker.fetch!(req, env, ctx);
+    expect(res.status).toBe(401);
+  });
 });

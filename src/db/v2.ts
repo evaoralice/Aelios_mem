@@ -1431,3 +1431,12 @@ export async function markBaselineChangelogError(
     .bind(input.errorMessage, input.id)
     .run();
 }
+
+// conflict → pending 回退：admin 标错 conflict 时可恢复，让做梦流程重新处理。
+// 同时清空 error_message，避免残留旧的冲突说明。
+export async function reopenBaselineChangelog(db: D1Database, input: { id: string }): Promise<void> {
+  await db
+    .prepare("UPDATE baseline_changelog SET status = 'pending', error_message = NULL, applied_at = NULL WHERE id = ?")
+    .bind(input.id)
+    .run();
+}
