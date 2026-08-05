@@ -1362,6 +1362,45 @@ export async function listPendingBaselineChangelog(
   return result.results ?? [];
 }
 
+// 通用列表查询：支持按 status / role_scope 筛选 + offset 分页。
+export async function listBaselineChangelog(
+  db: D1Database,
+  input: {
+    namespace: string;
+    status?: "pending" | "applied" | "conflict";
+    roleScope?: string;
+    limit?: number;
+    offset?: number;
+  }
+): Promise<BaselineChangelogRow[]> {
+  const limit = Math.min(input.limit ?? 50, 200);
+  const offset = Math.max(input.offset ?? 0, 0);
+  let sql = `SELECT * FROM baseline_changelog WHERE namespace = ?`;
+  const binds: unknown[] = [input.namespace];
+  if (input.status) {
+    sql += ` AND status = ?`;
+    binds.push(input.status);
+  }
+  if (input.roleScope) {
+    sql += ` AND role_scope = ?`;
+    binds.push(input.roleScope);
+  }
+  sql += ` ORDER BY created_at ASC LIMIT ? OFFSET ?`;
+  binds.push(limit, offset);
+  const result = await db.prepare(sql).bind(...binds).all<BaselineChangelogRow>();
+  return result.results ?? [];
+}
+
+export async function getBaselineChangelogById(
+  db: D1Database,
+  input: { namespace: string; id: string }
+): Promise<BaselineChangelogRow | null> {
+  return db
+    .prepare("SELECT * FROM baseline_changelog WHERE namespace = ? AND id = ?")
+    .bind(input.namespace, input.id)
+    .first<BaselineChangelogRow>();
+}
+
 export async function markBaselineChangelogApplied(
   db: D1Database,
   input: { id: string }
