@@ -1,13 +1,12 @@
 import { authenticate } from "../auth/apiKey";
 import { getOrCreateConversation } from "../db/conversations";
-import { fetchMemoriesByIds, getMemoryById, listMemoriesPage } from "../db/memories";
+import { fetchMemoriesByIds, getMemoryById, listMemoriesPage, softDeleteMemory } from "../db/memories";
 import { saveIngestMessages } from "../db/messages";
 import {
   archiveMemory,
   createPrecious,
   createChangelogEntry,
   createBaselineChangelogEntry,
-  deleteMemoryV2,
   fetchMemoryLifecycleRows,
   getDailyLog,
   getDigest,
@@ -639,24 +638,20 @@ export async function callTool(
     if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
     const id = readString(args.id);
     if (!id) return toolError("id is required");
+    const namespace = resolveNamespace(profile, args.namespace);
 
-    // v2: 硬删 D1 + 向量 (本体和镜像一起删)，找不到返回 false。
-    if (isV2Enabled(env)) {
-      const deleted = await deleteMemoryV2(env, {
-        namespace: resolveNamespace(profile, args.namespace),
-        id
-      });
-      if (!deleted) return toolError("Memory not found");
-      return textToolResult({ data: { id, deleted: true } });
+    // 软删：标 status=deleted，行保留在 D1（可恢复）。
+    // 同时删 Vectorize 向量，防止召回时复活已删除的记忆。
+    const deleted = await softDeleteMemory(env.DB, { namespace, id });
+    if (!deleted) return toolError("Memory not found");
+
+    try {
+      await deleteVectorMemory(env, id);
+    } catch (error) {
+      console.error("mcp memory_delete: vector delete failed (D1 soft-deleted, vector may linger)", { id, error });
     }
 
-    await deleteVectorMemory(env, id);
-    return textToolResult({
-      data: {
-        id,
-        deleted: true
-      }
-    });
+    return textToolResult({ data: { id, deleted: true } });
   }
 
   if (params.name === "memory_ingest") {
