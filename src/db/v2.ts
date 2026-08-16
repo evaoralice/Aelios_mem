@@ -629,21 +629,22 @@ export async function upsertMemoryByFactKey(
   const roleScope = computeRoleScope(input.roleId, input.roleName);
 
   // 先查同 fact_key + 同 role_scope 的 active memory：memories join 侧车表。
+  // 取旧维度值，未传新值时保留旧值而非重置。
   const existing = await db
     .prepare(
-      `SELECT m.id FROM memories m
+      `SELECT m.id, m.importance, m.emotional, m.recurrence, m.unresolved FROM memories m
        JOIN memory_lifecycle lc ON lc.memory_id = m.id
        WHERE m.namespace = ? AND m.status = 'active' AND lc.fact_key = ? AND m.role_scope = ?`
     )
     .bind(input.namespace, input.factKey, roleScope)
-    .first<{ id: string }>();
+    .first<{ id: string; importance: number; emotional: number; recurrence: number; unresolved: number }>();
 
   if (existing) {
-    // 更新 memories 本体
-    const imp = input.importance ?? 0.6;
-    const emo = input.emotional ?? 0.0;
-    const rec = input.recurrence ?? 0.0;
-    const unr = input.unresolved ?? 0.0;
+    // 更新 memories 本体 — 未传的维度保留旧值
+    const imp = input.importance ?? existing.importance;
+    const emo = input.emotional ?? existing.emotional;
+    const rec = input.recurrence ?? existing.recurrence;
+    const unr = input.unresolved ?? existing.unresolved;
     const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
     await db
       .prepare(
@@ -822,9 +823,9 @@ export async function supersedeMemory(
   const db = env.DB;
   const now = nowIso();
   const old = await db
-    .prepare("SELECT id, status, vector_id, role_scope, role_id, role_name FROM memories WHERE namespace = ? AND id = ?")
+    .prepare("SELECT id, status, vector_id, role_scope, role_id, role_name, importance, emotional, recurrence, unresolved FROM memories WHERE namespace = ? AND id = ?")
     .bind(input.namespace, input.oldId)
-    .first<{ id: string; status: string; vector_id: string | null; role_scope: string; role_id: string | null; role_name: string | null }>();
+    .first<{ id: string; status: string; vector_id: string | null; role_scope: string; role_id: string | null; role_name: string | null; importance: number; emotional: number; recurrence: number; unresolved: number }>();
   if (!old) throw new Error("memory to supersede not found");
 
   // 继承旧记忆的 role_scope + role_id + role_name，除非显式传了新值
@@ -851,11 +852,11 @@ export async function supersedeMemory(
     .bind(nextId, input.reason ?? null, old.id)
     .run();
 
-  // 2. 插新条目
-  const imp = input.importance ?? 0.6;
-  const emo = input.emotional ?? 0.0;
-  const rec = input.recurrence ?? 0.0;
-  const unr = input.unresolved ?? 0.0;
+  // 2. 插新条目 — 未传的维度继承旧记忆的值
+  const imp = input.importance ?? old.importance;
+  const emo = input.emotional ?? old.emotional;
+  const rec = input.recurrence ?? old.recurrence;
+  const unr = input.unresolved ?? old.unresolved;
   const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
   await db
     .prepare(
