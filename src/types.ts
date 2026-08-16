@@ -240,6 +240,10 @@ export interface MemoryRecord {
   summary: string | null;
   importance: number;
   confidence: number;
+  emotional: number;
+  recurrence: number;
+  unresolved: number;
+  weight: number;
   status: "active" | "deleted" | "superseded" | "low_confidence" | string;
   pinned: number;
   tags: string | null;
@@ -281,6 +285,10 @@ export interface MemoryApiRecord {
   summary: string | null;
   importance: number;
   confidence: number;
+  emotional: number;
+  recurrence: number;
+  unresolved: number;
+  weight: number;
   status: string;
   pinned: boolean;
   tags: string[];

@@ -12,6 +12,11 @@ import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { computeRoleScope } from "../utils/role";
 
+// 四维权重计算: importance*0.35 + emotional*0.25 + recurrence*0.25 + unresolved*0.15
+export function computeWeight(dims: { importance: number; emotional: number; recurrence: number; unresolved: number }): number {
+  return Math.round((dims.importance * 0.35 + dims.emotional * 0.25 + dims.recurrence * 0.25 + dims.unresolved * 0.15) * 1000) / 1000;
+}
+
 // 读取一条完整 MemoryRecord 用于向量同步。v2 写完 D1 后用它拿全字段。
 async function fetchMemoryForSync(
   db: D1Database,
@@ -617,7 +622,7 @@ export async function fetchMemoryLifecycleRows(
 // 同时写 D1 (本体) 和 Vectorize (检索镜像)，设 vector_id，否则 recall 召不到。
 export async function upsertMemoryByFactKey(
   env: Env,
-  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null; roleId?: string | null; roleName?: string | null }
+  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; emotional?: number; recurrence?: number; unresolved?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null; roleId?: string | null; roleName?: string | null }
 ): Promise<{ id: string; created: boolean }> {
   const db = env.DB;
   const now = nowIso();
@@ -634,18 +639,28 @@ export async function upsertMemoryByFactKey(
     .first<{ id: string }>();
 
   if (existing) {
-    // 更新 memories 本体 (v1 列)
+    // 更新 memories 本体
+    const imp = input.importance ?? 0.6;
+    const emo = input.emotional ?? 0.0;
+    const rec = input.recurrence ?? 0.0;
+    const unr = input.unresolved ?? 0.0;
+    const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
     await db
       .prepare(
         `UPDATE memories SET content = ?, type = ?, importance = ?, confidence = ?,
+          emotional = ?, recurrence = ?, unresolved = ?, weight = ?,
           tags = ?, source = ?, source_message_ids = ?, updated_at = ?
          WHERE id = ?`
       )
       .bind(
         input.content,
         input.type ?? "fact",
-        input.importance ?? 0.6,
+        imp,
         input.confidence ?? 0.8,
+        emo,
+        rec,
+        unr,
+        w,
         JSON.stringify(input.tags ?? []),
         input.source ?? null,
         JSON.stringify(input.sourceMessageIds ?? []),
@@ -665,24 +680,33 @@ export async function upsertMemoryByFactKey(
     return { id: existing.id, created: false };
   }
 
-  // 新增：先插 memories 本体 (v1 列 + vector_id)，再插侧车行。
+  // 新增：先插 memories 本体，再插侧车行。
   const id = newId("mem");
   const vectorId = `mem_${id}`;
+  const imp = input.importance ?? 0.6;
+  const emo = input.emotional ?? 0.0;
+  const rec = input.recurrence ?? 0.0;
+  const unr = input.unresolved ?? 0.0;
+  const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        id, namespace, type, content, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
         role_id, role_name, role_scope
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
     )
     .bind(
       id,
       input.namespace,
       input.type ?? "fact",
       input.content,
-      input.importance ?? 0.6,
+      imp,
       input.confidence ?? 0.8,
+      emo,
+      rec,
+      unr,
+      w,
       JSON.stringify(input.tags ?? []),
       input.source ?? null,
       JSON.stringify(input.sourceMessageIds ?? []),
@@ -785,6 +809,9 @@ export async function supersedeMemory(
     reason?: string | null;
     importance?: number;
     confidence?: number;
+    emotional?: number;
+    recurrence?: number;
+    unresolved?: number;
     tags?: string[];
     source?: string | null;
     sourceMessageIds?: string[];
@@ -824,22 +851,31 @@ export async function supersedeMemory(
     .bind(nextId, input.reason ?? null, old.id)
     .run();
 
-  // 2. 插新条目 (memories 本体，v1 列 + role 字段)
+  // 2. 插新条目
+  const imp = input.importance ?? 0.6;
+  const emo = input.emotional ?? 0.0;
+  const rec = input.recurrence ?? 0.0;
+  const unr = input.unresolved ?? 0.0;
+  const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        id, namespace, type, content, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
         role_id, role_name, role_scope
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, ?, ?)`
     )
     .bind(
       nextId,
       input.namespace,
       input.newType ?? "world_fact",
       input.newContent,
-      input.importance ?? 0.6,
+      imp,
       input.confidence ?? 0.8,
+      emo,
+      rec,
+      unr,
+      w,
       JSON.stringify(input.tags ?? []),
       input.source ?? "supersede",
       JSON.stringify(input.sourceMessageIds ?? []),
@@ -1000,6 +1036,7 @@ export interface DailyLogRow {
   date: string;
   title: string;
   summary: string;
+  affect_chord: string | null;
   updated_at: string;
 }
 
@@ -1009,7 +1046,7 @@ export async function getDailyLog(
 ): Promise<DailyLogRow | null> {
   const roleScope = input.roleScope ?? "shared";
   const row = await db
-    .prepare("SELECT namespace, role_scope, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? AND date = ?")
+    .prepare("SELECT namespace, role_scope, date, title, summary, affect_chord, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? AND date = ?")
     .bind(input.namespace, roleScope, input.date)
     .first<DailyLogRow>();
   return row ?? null;
@@ -1021,7 +1058,7 @@ export async function getRecentDailyLogs(
 ): Promise<DailyLogRow[]> {
   const roleScope = input.roleScope ?? "shared";
   const result = await db
-    .prepare("SELECT namespace, role_scope, date, title, summary, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? ORDER BY date DESC LIMIT ?")
+    .prepare("SELECT namespace, role_scope, date, title, summary, affect_chord, updated_at FROM daily_log WHERE namespace = ? AND role_scope = ? ORDER BY date DESC LIMIT ?")
     .bind(input.namespace, roleScope, input.limit)
     .all<DailyLogRow>();
   return result.results ?? [];
@@ -1029,18 +1066,19 @@ export async function getRecentDailyLogs(
 
 export async function upsertDailyLog(
   db: D1Database,
-  input: { namespace: string; date: string; title: string; summary: string; roleScope?: string }
+  input: { namespace: string; date: string; title: string; summary: string; affectChord?: string | null; roleScope?: string }
 ): Promise<DailyLogRow> {
   const now = nowIso();
   const roleScope = input.roleScope ?? "shared";
+  const chord = input.affectChord ?? null;
   await db
     .prepare(
-      `INSERT INTO daily_log (namespace, role_scope, date, title, summary, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, role_scope, date) DO UPDATE SET title = excluded.title, summary = excluded.summary, updated_at = excluded.updated_at`
+      `INSERT INTO daily_log (namespace, role_scope, date, title, summary, affect_chord, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, role_scope, date) DO UPDATE SET title = excluded.title, summary = excluded.summary, affect_chord = COALESCE(excluded.affect_chord, daily_log.affect_chord), updated_at = excluded.updated_at`
     )
-    .bind(input.namespace, roleScope, input.date, input.title, input.summary, now)
+    .bind(input.namespace, roleScope, input.date, input.title, input.summary, chord, now)
     .run();
-  return { namespace: input.namespace, role_scope: roleScope, date: input.date, title: input.title, summary: input.summary, updated_at: now };
+  return { namespace: input.namespace, role_scope: roleScope, date: input.date, title: input.title, summary: input.summary, affect_chord: chord, updated_at: now };
 }
 
 // =====================================================================

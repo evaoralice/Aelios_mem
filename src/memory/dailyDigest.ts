@@ -44,6 +44,9 @@ interface DigestMemoryUpdate {
   type?: string;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   tags?: string[];
 }
 
@@ -349,6 +352,9 @@ function normalizeExtractedMemory(value: unknown): ExtractedMemory | null {
     content,
     importance: clampScore(raw.importance, 0.7),
     confidence: clampScore(raw.confidence, 0.82),
+    emotional: typeof raw.emotional === "number" ? clampScore(raw.emotional, 0) : undefined,
+    recurrence: typeof raw.recurrence === "number" ? clampScore(raw.recurrence, 0) : undefined,
+    unresolved: typeof raw.unresolved === "number" ? clampScore(raw.unresolved, 0) : undefined,
     tags: readStringArray(raw.tags),
     source_message_ids: readStringArray(raw.source_message_ids),
     fact_key: typeof raw.fact_key === "string" && raw.fact_key.trim() ? raw.fact_key.trim() : undefined
@@ -399,6 +405,9 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
             type: readString(record.type) ?? undefined,
             importance: typeof record.importance === "number" ? clampScore(record.importance, 0.7) : undefined,
             confidence: typeof record.confidence === "number" ? clampScore(record.confidence, 0.82) : undefined,
+            emotional: typeof record.emotional === "number" ? clampScore(record.emotional, 0) : undefined,
+            recurrence: typeof record.recurrence === "number" ? clampScore(record.recurrence, 0) : undefined,
+            unresolved: typeof record.unresolved === "number" ? clampScore(record.unresolved, 0) : undefined,
             tags: Array.isArray(record.tags) ? readStringArray(record.tags) : undefined
           }
         ];
@@ -452,6 +461,9 @@ function normalizeDigestResult(value: unknown): DailyDigestResult {
                 type: readString(subRecord.type) ?? undefined,
                 importance: typeof subRecord.importance === "number" ? clampScore(subRecord.importance, 0.7) : undefined,
                 confidence: typeof subRecord.confidence === "number" ? clampScore(subRecord.confidence, 0.82) : undefined,
+                emotional: typeof subRecord.emotional === "number" ? clampScore(subRecord.emotional, 0) : undefined,
+                recurrence: typeof subRecord.recurrence === "number" ? clampScore(subRecord.recurrence, 0) : undefined,
+                unresolved: typeof subRecord.unresolved === "number" ? clampScore(subRecord.unresolved, 0) : undefined,
                 tags: Array.isArray(subRecord.tags) ? readStringArray(subRecord.tags) : undefined,
               }];
             })
@@ -561,6 +573,7 @@ function buildDigestPrompt(input: {
     "- 当旧记忆和新信息冲突时，优先更新或删除旧记忆，不要并排留下互相打架的版本。",
     "- 当新信息只是旧记忆的更准确版本，优先 memories_to_update，不要 memories_to_add。",
     "- v2 的首次抽取已由每 4 小时 extractor 负责；memories_to_add 默认给空数组，不要把当天聊天首次抽取成新长期记忆。",
+    "- memories_to_update 可选字段 emotional(0-1 情感强度)、recurrence(0-1 复现概率)、unresolved(0-1 未解决程度)；只在有明确判据时填写，否则省略让系统取默认值。",
     "- 当多条旧记忆重复，保留更完整的一条并删除重复项；必要时先 update 保留项。",
     "- pinned=true 的旧记忆不能删除，只能在 memories_to_update 中提出更保守的补充。",
     "- 站在“我=助手”的视角写。关于用户，用“你……”；关于助手承诺，用“我需要……”。",
@@ -588,7 +601,7 @@ function buildDigestPrompt(input: {
         groups: input.roleGroups!.map((g) => ({
           role_scope: g.role_scope,
           daily_log: { title: "当天标题", summary: "- 互动要点1\n- 互动要点2" },
-          memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8 }],
+          memories_to_update: [{ target_id: "mem_x", content: "…", type: "fact", importance: 0.8, emotional: 0.3, recurrence: 0.5, unresolved: 0.0 }],
           memories_to_delete: [{ target_id: "mem_y", reason: "重复" }],
         })),
         important_excerpts: [{ quote: "原文", reason: "理由", tags: ["project"] }],
@@ -634,6 +647,9 @@ function buildDigestPrompt(input: {
             type: "project",
             importance: 0.88,
             confidence: 0.9,
+            emotional: 0.3,
+            recurrence: 0.5,
+            unresolved: 0.0,
             tags: ["project"]
           }
         ],
@@ -1197,6 +1213,9 @@ async function applyDreamV2(
         type: item.type,
         importance: item.importance,
         confidence: item.confidence,
+        emotional: item.emotional,
+        recurrence: item.recurrence,
+        unresolved: item.unresolved,
         tags: item.tags,
         source: "dream",
         sourceMessageIds: messageIds,
@@ -1210,6 +1229,10 @@ async function applyDreamV2(
         oldId: item.target_id,
         newContent: item.content,
         newType: item.type,
+        importance: item.importance,
+        emotional: item.emotional,
+        recurrence: item.recurrence,
+        unresolved: item.unresolved,
         reason: isReview ? "dream_review_proposal" : "dream_update",
         source: "dream",
       });

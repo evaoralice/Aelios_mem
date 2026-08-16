@@ -6,6 +6,9 @@ export interface ExtractedMemory {
   content: string;
   importance: number;
   confidence: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   tags: string[];
   source_message_ids: string[];
   fact_key?: string;  // v2: model can provide fact_key for upsert dedup

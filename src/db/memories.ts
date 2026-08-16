@@ -1,4 +1,5 @@
 import type { MemoryRecord } from "../types";
+import { computeWeight } from "./v2";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -9,6 +10,9 @@ export interface CreateMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   status?: string;
   pinned?: boolean;
   tags?: string[];
@@ -37,6 +41,9 @@ export interface UpdateMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   status?: string;
   pinned?: boolean;
   tags?: string[];
@@ -48,14 +55,23 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
   const id = newId("mem");
   const now = nowIso();
   const vectorId = `mem_${id}`;
+  const imp = input.importance ?? 0.5;
+  const emo = input.emotional ?? 0;
+  const rec = input.recurrence ?? 0;
+  const unr = input.unresolved ?? 0;
+  const w = computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr });
   const record: MemoryRecord = {
     id,
     namespace: input.namespace,
     type: input.type,
     content: input.content,
     summary: input.summary ?? null,
-    importance: input.importance ?? 0.5,
+    importance: imp,
     confidence: input.confidence ?? 0.8,
+    emotional: emo,
+    recurrence: rec,
+    unresolved: unr,
+    weight: w,
     status: input.status ?? "active",
     pinned: input.pinned ? 1 : 0,
     tags: JSON.stringify(input.tags ?? []),
@@ -72,9 +88,9 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, summary, importance, confidence, status,
-        pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, namespace, type, content, summary, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -84,6 +100,10 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -182,6 +202,22 @@ export async function updateMemory(
   if (input.patch.summary !== undefined) set("summary", input.patch.summary);
   if (input.patch.importance !== undefined) set("importance", input.patch.importance);
   if (input.patch.confidence !== undefined) set("confidence", input.patch.confidence);
+  if (input.patch.emotional !== undefined) set("emotional", input.patch.emotional);
+  if (input.patch.recurrence !== undefined) set("recurrence", input.patch.recurrence);
+  if (input.patch.unresolved !== undefined) set("unresolved", input.patch.unresolved);
+  // Recompute weight if any dimension changed
+  const hasDimChange = input.patch.importance !== undefined || input.patch.emotional !== undefined || input.patch.recurrence !== undefined || input.patch.unresolved !== undefined;
+  if (hasDimChange) {
+    // Need current values for unchanged dimensions — fetch existing record
+    const existing = await getMemoryById(db, { namespace: input.namespace, id: input.id });
+    if (existing) {
+      const imp = input.patch.importance ?? existing.importance;
+      const emo = input.patch.emotional ?? existing.emotional;
+      const rec = input.patch.recurrence ?? existing.recurrence;
+      const unr = input.patch.unresolved ?? existing.unresolved;
+      set("weight", computeWeight({ importance: imp, emotional: emo, recurrence: rec, unresolved: unr }));
+    }
+  }
   if (input.patch.status !== undefined) set("status", input.patch.status);
   if (input.patch.pinned !== undefined) set("pinned", input.patch.pinned ? 1 : 0);
   if (input.patch.tags !== undefined) set("tags", JSON.stringify(input.patch.tags));

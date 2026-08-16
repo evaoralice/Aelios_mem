@@ -133,6 +133,10 @@ export function vectorMetadataToMemoryRecord(
     summary: readString(metadata.summary),
     importance: clampScore(metadata.importance, 0.5),
     confidence: clampScore(metadata.confidence, 0.8),
+    emotional: 0,
+    recurrence: 0,
+    unresolved: 0,
+    weight: 0,
     status,
     pinned: readBoolean(metadata.pinned),
     tags: parseStringArray(metadata.tags),
@@ -190,6 +194,10 @@ function memoryRecordToApiRecord(record: MemoryRecord): MemoryApiRecord {
     summary: record.summary,
     importance: record.importance,
     confidence: record.confidence,
+    emotional: record.emotional,
+    recurrence: record.recurrence,
+    unresolved: record.unresolved,
+    weight: record.weight,
     status: record.status,
     pinned: Boolean(record.pinned),
     tags: parseStringArray(record.tags),
@@ -213,6 +221,10 @@ function toMemoryRecord(input: Required<VectorMemoryInput> & { id: string; vecto
     summary: input.summary,
     importance: input.importance,
     confidence: input.confidence,
+    emotional: 0,
+    recurrence: 0,
+    unresolved: 0,
+    weight: input.importance * 0.35, // only importance contributes when dims not set
     status: "active",
     pinned: input.pinned ? 1 : 0,
     tags: JSON.stringify(input.tags),
@@ -231,9 +243,9 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
   const memoryInsert = env.DB
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, summary, importance, confidence, status,
-        pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, namespace, type, content, summary, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -243,6 +255,10 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -318,8 +334,9 @@ async function updateMemoryRecord(env: Env, record: MemoryRecord): Promise<Memor
   await env.DB
     .prepare(
       `UPDATE memories SET
-        type = ?, content = ?, summary = ?, importance = ?, confidence = ?, status = ?,
-        pinned = ?, tags = ?, source = ?, source_message_ids = ?, vector_id = ?,
+        type = ?, content = ?, summary = ?, importance = ?, confidence = ?,
+        emotional = ?, recurrence = ?, unresolved = ?, weight = ?,
+        status = ?, pinned = ?, tags = ?, source = ?, source_message_ids = ?, vector_id = ?,
         updated_at = ?, expires_at = ?
        WHERE namespace = ? AND id = ?`
     )
@@ -329,6 +346,10 @@ async function updateMemoryRecord(env: Env, record: MemoryRecord): Promise<Memor
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -519,6 +540,10 @@ export async function updateVectorMemory(
     summary: next.summary,
     importance: next.importance,
     confidence: next.confidence,
+    emotional: existing.emotional ?? 0,
+    recurrence: existing.recurrence ?? 0,
+    unresolved: existing.unresolved ?? 0,
+    weight: existing.weight ?? 0,
     status: next.status,
     pinned: next.pinned ? 1 : 0,
     tags: JSON.stringify(next.tags),

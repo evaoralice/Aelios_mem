@@ -8,6 +8,7 @@ describe("types.ts role fields (Phase A)", () => {
     const record: MemoryRecord = {
       id: "m1", namespace: "ns", type: "fact", content: "test",
       summary: null, importance: 0.7, confidence: 0.8,
+      emotional: 0, recurrence: 0, unresolved: 0, weight: 0,
       status: "active", pinned: 0, tags: null, source: null,
       source_message_ids: null, vector_id: null,
       last_recalled_at: null, recall_count: 0,
@@ -25,6 +26,7 @@ describe("types.ts role fields (Phase A)", () => {
     const rec: MemoryApiRecord = {
       id: "m1", namespace: "ns", type: "fact", content: "test",
       summary: null, importance: 0.7, confidence: 0.8,
+      emotional: 0, recurrence: 0, unresolved: 0, weight: 0,
       status: "active", pinned: false, tags: [],
       source: null, source_message_ids: [], vector_id: null,
       last_recalled_at: null, recall_count: 0,
