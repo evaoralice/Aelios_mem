@@ -110,7 +110,12 @@ function getTools(): Array<Record<string, unknown>> {
   return [
     {
       name: "memory_search",
-      description: "Search the user's long-term memory library.",
+      description:
+        "Ad-hoc vector search across the user's long-term memory library. " +
+        "Use for manual, on-demand queries (e.g. user asks 'what do you remember about X?'). " +
+        "Returns compressed content but full metadata (created_at, fact_key, importance, tags, etc.). " +
+        "To retrieve the original uncompressed content of a specific memory, use memory_get with its ID. " +
+        "For automatic per-turn recall with dedup/decay gating, use memory_recall instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -154,7 +159,8 @@ function getTools(): Array<Record<string, unknown>> {
     },
     {
       name: "memory_get",
-      description: "Get one memory from the Vectorize memory library by id.",
+      description: "Get one memory by ID with full original (uncompressed) content and all metadata. " +
+        "Use to retrieve the complete text of a memory found via memory_search or memory_recall.",
       inputSchema: {
         type: "object",
         properties: {
@@ -176,7 +182,10 @@ function getTools(): Array<Record<string, unknown>> {
     },
     {
       name: "memory_ingest",
-      description: "Save chat messages and optionally extract memories from them.",
+      description:
+        "Archive raw chat messages and optionally trigger background memory extraction. " +
+        "This is for bulk message ingestion, NOT for recording individual facts or preferences. " +
+        "To proactively store a specific user fact/preference/relationship, use memory_upsert instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -204,7 +213,7 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "memory_boot",
       description:
-        "Cold-start package: current role baseline + recent daily logs (current role only) + top pinned precious + all glossary. " +
+        "Cold-start package: L1 digest + current role baseline + recent daily logs (current role only) + top pinned precious + all glossary. " +
         "Output is stable and deterministically ordered so the client can cache it. " +
         "Call once on SessionStart with role_id/role_name to scope baseline and daily_log to the current role.",
       inputSchema: {
@@ -219,8 +228,8 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "memory_recall",
       description:
-        "Per-turn dynamic recall: glossary literal hits + memories(active) vector + world_fact " +
-        "+ longtail fallback. Gate 3 inject-decay on last_injected_at. Gate 2 dedups hits against " +
+        "Per-turn dynamic recall: glossary literal hits + active memories vector search (includes all types such as fact, world_fact, etc.) " +
+        "+ longtail fallback when nothing else matches. Gate 3: inject-decay on last_injected_at. Gate 2: dedups hits against " +
         "the core layer (digest + precious) so the model isn't re-fed what it already knows this turn. " +
         "Precious is NOT queried here (gate 1: it lives in boot). Call on UserPromptSubmit.",
       inputSchema: {
@@ -254,7 +263,8 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "glossary_set",
       description: "Add or update a glossary term (L5, literal recall, not in vector index). " +
-        "Upsert by (namespace, term).",
+        "Upsert by (namespace, term). Use when the user introduces slang, abbreviations, nicknames, " +
+        "or domain-specific terms that need exact-match recall rather than semantic search.",
       inputSchema: {
         type: "object",
         properties: {
@@ -286,14 +296,17 @@ function getTools(): Array<Record<string, unknown>> {
           },
           content: { type: "string" },
           type: { type: "string", description: "Memory type. One of: fact, event, preference, relationship, boundary, habit, decision, note, world_fact. Defaults to 'fact'." },
-          importance: { type: "number", minimum: 0, maximum: 1, description: "重要性 0-1，1 为最重要。默认 0.6。" },
-          confidence: { type: "number", minimum: 0, maximum: 1, description: "置信度 0-1。默认 0.8。" },
+          importance: { type: "number", minimum: 0, maximum: 1, description: "Importance 0-1: how much does this affect core relationships/projects? Defaults to 0.6." },
+          emotional: { type: "number", minimum: 0, maximum: 1, description: "Emotional intensity 0-1: how emotionally charged was this moment? Defaults to 0.0." },
+          recurrence: { type: "number", minimum: 0, maximum: 1, description: "Recurrence likelihood 0-1: will this pattern/topic come up again? Defaults to 0.0." },
+          unresolved: { type: "number", minimum: 0, maximum: 1, description: "Unresolved tension 0-1: is this still an open/pending matter? Set to 0 once resolved. Defaults to 0.0." },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "Confidence 0-1. Defaults to 0.8." },
           tags: { type: "array", items: { type: "string" } },
           source: { type: "string" },
           valid_as_of: { type: "string" },
           namespace: { type: "string" },
-          role_id: { type: "string", description: "角色 ID。不传存为共享记忆。" },
-          role_name: { type: "string", description: "角色名称。无 role_id 时用于兜底 scope。" }
+          role_id: { type: "string", description: "Role ID. Omit to store as shared memory." },
+          role_name: { type: "string", description: "Role name. Used as fallback scope when role_id is not provided." }
         },
         required: ["fact_key", "content"]
       }
@@ -361,30 +374,31 @@ function getTools(): Array<Record<string, unknown>> {
     {
       name: "baseline_change",
       description:
-        "提交角色长期印象（baseline）的增删改（pending）。凌晨做梦时统一合并应用。" +
-        "不影响当前缓存里的 baseline。用于小幅度更新角色对用户的长期认知。",
+        "Submit a pending change (add/update/delete) to a role's long-term baseline impression. " +
+        "Changes are batched and merged during the nightly dream cycle, not applied immediately. " +
+        "Use for incremental updates to the role's lasting perception of the user.",
       inputSchema: {
         type: "object",
         properties: {
           op: {
             type: "string",
-            description: "add | update | delete。add=新增印象，update=修改已有印象，delete=删除过时印象。",
+            description: "add | update | delete. add = new impression, update = revise existing, delete = remove outdated.",
           },
           before_content: {
             type: "string",
-            description: "要修改/删除的原文片段（update 和 delete 时必填，add 时不传）。",
+            description: "Original text snippet to modify/delete (required for update and delete, omit for add).",
           },
           after_content: {
             type: "string",
-            description: "修改后的文本（add 和 update 时必填，delete 时不传）。",
+            description: "New/updated text (required for add and update, omit for delete).",
           },
           reason: {
             type: "string",
-            description: "为什么要改（必填）。",
+            description: "Reason for the change (required).",
           },
           role_id: {
             type: "string",
-            description: "角色 ID（必填，baseline 是角色专属，不支持 shared）。",
+            description: "Role ID (required — baseline is role-specific, shared is not supported).",
           },
           role_name: { type: "string" },
         },
@@ -395,7 +409,8 @@ function getTools(): Array<Record<string, unknown>> {
       name: "memory_supersede",
       description:
         "Mark old_id as superseded and insert a new active entry, linking the supersede chain. " +
-        "Used for world_fact updates that invalidate older entries.",
+        "Use when you have the old memory's ID and want to explicitly mark it as replaced (e.g. world_fact updates that invalidate older entries). " +
+        "For key-based dedup where you don't need to reference an old ID, use memory_upsert with the same fact_key instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -412,7 +427,8 @@ function getTools(): Array<Record<string, unknown>> {
     },
     {
       name: "memory_archive",
-      description: "Soft-archive a memory (status='archived'). Does not touch the supersede chain.",
+      description: "Soft-archive a memory (status='archived'). Does not touch the supersede chain. " +
+        "Use to retire a memory that is no longer relevant without fully deleting it.",
       inputSchema: {
         type: "object",
         properties: {
@@ -467,12 +483,23 @@ function getTools(): Array<Record<string, unknown>> {
         "Append to today's daily log. Date is determined by the server (Asia/Singapore timezone). " +
         "If a log already exists for today, the new summary lines are appended (not overwritten). " +
         "Call this near the end of a conversation to record what was discussed. " +
-        "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars total.",
+        "Title should be <=12 chars. Summary should use '- ' prefixed bullet points, <=800 chars total. " +
+        "Optionally attach an affect_chord to capture the emotional temperature of the day in chord notation.",
       inputSchema: {
         type: "object",
         properties: {
           title: { type: "string", description: "Short title, <=12 chars. Ignored if today's log already has a title." },
           summary: { type: "string", description: "Bullet-point summary to append, each line starts with '- ', <=800 chars" },
+          affect_chord: {
+            type: "string",
+            description:
+              "Optional chord-progression line capturing today's emotional temperature. " +
+              "Format: concrete chord names joined by ' → ', optionally followed by ' · <bpm>bpm' and/or a dynamic mark (pp/p/mp/mf/f/ff). " +
+              "Example: 'Fmaj9 → C/E → Am add9 → G6sus4 · 60bpm · mp'. " +
+              "Max 4 chords per line. Use absolute chord names (Cmaj7, not I), because key color matters. " +
+              "Only write this when the conversation carried meaningful emotional weight — skip for routine/neutral sessions. " +
+              "If today's log already has a chord, a new chord will replace it."
+          },
           role_id: { type: "string", description: "Role ID to scope log to a specific role" },
           role_name: { type: "string", description: "Role name (fallback if no role_id)" },
           namespace: { type: "string" }
@@ -760,11 +787,10 @@ export async function callTool(
     const content = readString(args.content);
     if (!factKey) return toolError("fact_key is required");
     if (!content) return toolError("content is required");
-    if (args.importance != null && !isValidRange(args.importance, 0, 1)) {
-      return toolError("importance must be between 0 and 1");
-    }
-    if (args.confidence != null && !isValidRange(args.confidence, 0, 1)) {
-      return toolError("confidence must be between 0 and 1");
+    for (const dim of ["importance", "confidence", "emotional", "recurrence", "unresolved"] as const) {
+      if (args[dim] != null && !isValidRange(args[dim], 0, 1)) {
+        return toolError(`${dim} must be between 0 and 1`);
+      }
     }
     const result = await upsertMemoryByFactKey(env, {
       namespace: resolveNamespace(profile, args.namespace),
@@ -773,6 +799,9 @@ export async function callTool(
       type: readString(args.type) || "fact",
       importance: readNumber(args.importance, 0.6),
       confidence: readNumber(args.confidence, 0.8),
+      emotional: readNumber(args.emotional, 0.0),
+      recurrence: readNumber(args.recurrence, 0.0),
+      unresolved: readNumber(args.unresolved, 0.0),
       tags: readStringArray(args.tags),
       source: readString(args.source) || "mcp",
       validAsOf: readString(args.valid_as_of),
@@ -972,7 +1001,10 @@ export async function callTool(
 
     if (mergedSummary.length > 2000) return toolError("merged summary exceeds 2000 characters; today's log is getting too long");
 
-    const log = await upsertDailyLog(env.DB, { namespace, date, title: mergedTitle, summary: mergedSummary, roleScope });
+    // Affect chord: new value replaces existing; omitting preserves existing (handled by COALESCE in DB layer)
+    const affectChord = readString(args.affect_chord) || null;
+
+    const log = await upsertDailyLog(env.DB, { namespace, date, title: mergedTitle, summary: mergedSummary, affectChord, roleScope });
     return textToolResult({ data: log });
   }
 

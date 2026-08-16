@@ -201,7 +201,11 @@ export function formatBootStable(boot: BootPackage): string {
   }
   if (boot.recent_logs && boot.recent_logs.length > 0) {
     const entries = boot.recent_logs.map(
-      (log) => `[${log.date}]【${log.title}】${log.summary}`
+      (log) => {
+        let line = `[${log.date}]【${log.title}】${log.summary}`;
+        if (log.affect_chord) line += `\n♪ ${log.affect_chord}`;
+        return line;
+      }
     );
     parts.push("<daily_log>", ...entries, "</daily_log>");
   }
@@ -212,12 +216,13 @@ export function formatBootStable(boot: BootPackage): string {
   return parts.join("\n");
 }
 
-export function formatRecallPatch(hits: Array<{ type: string; content: string; importance?: number }>): string {
+export function formatRecallPatch(hits: Array<{ type: string; content: string; importance?: number; created_at?: string }>): string {
   const lines = hits
     .map((h) => {
       const content = h.content.replace(/debug-test/gi, "").replace(/记忆系统/g, "").trim();
       if (!content) return null;
-      return `- [${h.type}] ${content}`;
+      const dateTag = h.created_at ? `[${h.created_at.slice(0, 10)}]` : "";
+      return `- [${h.type}]${dateTag} ${content}`;
     })
     .filter(Boolean);
   if (lines.length === 0) return "";

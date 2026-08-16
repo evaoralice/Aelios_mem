@@ -221,7 +221,7 @@ function dedupeCrossScope(
 
 export interface BootPackage {
   digest: { content: string; updated_at: string } | null;
-  recent_logs: Array<{ date: string; title: string; summary: string }>;
+  recent_logs: Array<{ date: string; title: string; summary: string; affect_chord?: string | null }>;
   precious: Array<{ id: string; content: string; created_at: string }>;
   glossary: Array<{ term: string; definition: string; aliases: string[] }>;
   baselines: Array<{ role_scope: string; content: string; version: number }>;
@@ -262,15 +262,15 @@ export async function buildBootPackage(
   // 最近两天的日志 (dream 产出) — P1-3: 当前请求只读当前角色最近两天
   // 无角色绑定时使用 shared；不拼接其他角色日记。
   const roleScope = isRoleMemoryEnabled(env) ? computeRoleScope(input.roleId, input.roleName) : "shared";
-  let recent_logs: Array<{ date: string; title: string; summary: string }> = [];
+  let recent_logs: Array<{ date: string; title: string; summary: string; affect_chord?: string | null }> = [];
   if (roleScope === "shared") {
     const sharedLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope: "shared" });
-    recent_logs = sharedLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary }))
+    recent_logs = sharedLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary, ...(r.affect_chord ? { affect_chord: r.affect_chord } : {}) }))
       .sort((a, b) => b.date.localeCompare(a.date))
       .slice(0, 2);
   } else {
     const roleLogs = await getRecentDailyLogs(env.DB, { namespace: input.namespace, limit: 2, roleScope });
-    recent_logs = roleLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary }))
+    recent_logs = roleLogs.map((r) => ({ date: r.date, title: r.title, summary: r.summary, ...(r.affect_chord ? { affect_chord: r.affect_chord } : {}) }))
       .sort((a, b) => b.date.localeCompare(a.date))
       .slice(0, 2);
   }
@@ -358,6 +358,7 @@ export interface RecallHit {
   score: number;
   source_layer: "glossary" | "memory" | "longtail";
   role_scope?: string;
+  created_at?: string;
   // 闸二标记: 被核心层去重剔除的命中, 供调试/面板观察。
   deduped_against_core?: boolean;
 }
@@ -469,6 +470,7 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
       score: (m.score ?? 0) * decay * sBoost * rBoost,
       source_layer: "memory" as const,
       role_scope: m.role_scope ?? "shared",
+      created_at: m.created_at,
     };
   });
 
