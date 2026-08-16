@@ -1,7 +1,7 @@
 # Aelios 开发者地图
 
 > 改代码之前先查这份文档：找到要改的功能 → 定位文件 → 看影响范围。
-> 最后更新：2026-07-27（含多角色记忆 + baseline pending 改造）
+> 最后更新：2026-08-16（含四维记忆权重 + affect chord + proxy 规则调整）
 
 ---
 
@@ -30,6 +30,8 @@
 | **baseline 文本注入** | `assembler/types.ts`(formatBootStable) + `memory/v2/recall.ts`(buildBootPackage) | `blocks.ts` |
 | **Vectorize 角色元数据** | `memory/vectorStore.ts` | `search.ts`、`extractPipeline`、`dailyDigest` |
 | **Vectorize 回填脚本** | `scripts/backfill-vectorize-role.mjs` | 独立脚本 |
+| **四维记忆权重** | `db/v2.ts`(computeWeight) + `types.ts` | 所有写入路径（upsert/supersede/create/update）、MCP `memory_upsert`、dream prompt |
+| **affect chord** | `db/v2.ts`(daily_log) + `assembler/types.ts`(boot 渲染) | `mcp.ts`(daily_log_write)、`memory/v2/recall.ts`(BootPackage) |
 
 ---
 
@@ -202,17 +204,29 @@
 - [ ] 部署：`npm run deploy:cloudflare`（会自动跑迁移）
 - [ ] ⚠️ D1 ALTER TABLE 不支持 IF NOT EXISTS，迁移只能跑一次
 
+### 改四维记忆权重
+- [ ] `db/v2.ts` — computeWeight() 公式 + upsertMemoryByFactKey + supersedeMemory（未传维度时保留旧值）
+- [ ] `db/memories.ts` — createMemory + updateMemory（含 weight 重算）
+- [ ] `memory/vectorStore.ts` — toMemoryRecord + insertMemoryRecord + updateMemoryRecord
+- [ ] `types.ts` — MemoryRecord + MemoryApiRecord 接口
+- [ ] `api/mcp.ts` — memory_upsert 工具定义 + 校验 + callTool 传参
+- [ ] `memory/dailyDigest.ts` — dream prompt JSON 示例 + normalizeDigestResult 解析 + 写入路径传参
+- [ ] `memory/extract.ts` — ExtractedMemory 接口
+- [ ] `memory/extractPipeline.ts` — upsertMemoryByFactKey 调用传参
+- [ ] `memory/search.ts` — toMemoryApiRecord + vectorizeMatchToApiRecord 映射
+- [ ] 验证：`npx tsc --noEmit` + `npx vitest run`
+
 ---
 
 ## 四、数据库表对照
 
 | 表 | 主要操作文件 | migration |
 |------|------------|-----------|
-| memories | `db/memories.ts`、`db/v2.ts` | 0001、0006（加 role） |
+| memories | `db/memories.ts`、`db/v2.ts` | 0001、0006（加 role）、0010（加 emotional/recurrence/unresolved/weight） |
 | messages | `db/messages.ts` | 0001、0006（加 role） |
 | conversations | `db/conversations.ts` | 0001、0006（加 role） |
 | memory_lifecycle | `db/v2.ts` | 0003、0006（加 role_scope） |
-| daily_log | `db/v2.ts` | 0004、0006（重建加 role_scope） |
+| daily_log | `db/v2.ts` | 0004、0006（重建加 role_scope）、0009（加 affect_chord） |
 | digest | `db/v2.ts` | 0003 |
 | precious | `db/v2.ts` | 0003 |
 | glossary | `db/v2.ts` | 0003 |

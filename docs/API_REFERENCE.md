@@ -1,7 +1,7 @@
 # Aelios API 接口参考
 
 > 所有接口的完整请求/响应格式。基于源码整理。
-> 最后更新：2026-07-31
+> 最后更新：2026-08-16
 
 ---
 
@@ -196,12 +196,17 @@ JSON-RPC 2.0 格式。
 | fact_key | string | 是 | 去重键，相同 key 更新而非新建 |
 | content | string | 是 | |
 | type | string | 否 | fact/event/preference/relationship/boundary/habit/decision/note/world_fact，默认 fact |
-| importance | number | 否 | 0-1，默认 0.6 |
+| importance | number | 否 | 0-1，核心关系/项目影响度，默认 0.6 |
+| emotional | number | 否 | 0-1，情感强度，默认 0。更新时未传则保留旧值 |
+| recurrence | number | 否 | 0-1，复现概率，默认 0。更新时未传则保留旧值 |
+| unresolved | number | 否 | 0-1，未解决程度，默认 0，解决后设 0。更新时未传则保留旧值 |
 | confidence | number | 否 | 0-1，默认 0.8 |
 | tags | string[] | 否 | |
 | source | string | 否 | 默认 mcp |
 | role_id | string | 否 | |
 | role_name | string | 否 | |
+
+四维权重公式：`weight = importance×0.35 + emotional×0.25 + recurrence×0.25 + unresolved×0.15`，写入时自动计算存储。
 
 #### baseline_change（提交 baseline 变更 pending）
 
@@ -293,6 +298,7 @@ JSON-RPC 2.0 格式。
 |------|------|:----:|------|
 | title | string | 是 | ≤12 字，已有日志时保留已有 title |
 | summary | string | 否 | `- ` 开头的要点，≤800 字 |
+| affect_chord | string | 否 | 当日情感情境和弦（自由文本），已有时覆盖、未传时保留已有值 |
 | role_id | string | 否 | 按角色隔离 |
 | role_name | string | 否 | role_id 的兜底 |
 
