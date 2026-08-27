@@ -1029,6 +1029,7 @@ export async function listActiveMemories(
 
 // =====================================================================
 // 昨天日志 daily_log (dream 每天写一条，boot 读"昨天")
+// 也可由模型通过 MCP daily_log_write 主动写入，含 affect_chord（当日情绪和弦）。
 // =====================================================================
 
 export interface DailyLogRow {
