@@ -106,6 +106,11 @@ export async function upsertMemoryEmbedding(env: Env, memory: MemoryRecord): Pro
         created_at: memory.created_at,
         updated_at: memory.updated_at,
         expires_at: memory.expires_at || "",
+        // 与 vectorStore.toMetadata 对齐：Vectorize upsert 是整体覆盖，
+        // 漏掉 role 字段会把已有的角色元数据抹掉（role boost / dream scope 判断都依赖它）。
+        role_id: memory.role_id || "",
+        role_name: memory.role_name || "",
+        role_scope: memory.role_scope || "shared",
       }
     }
   ]);
