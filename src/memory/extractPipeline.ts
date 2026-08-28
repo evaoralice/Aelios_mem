@@ -173,6 +173,11 @@ function normalizeCandidate(item: unknown): ExtractedMemory | null {
     content,
     importance: clampScore(raw.importance, 0.65),
     confidence: clampScore(raw.confidence, 0.82),
+    // 三维与 dream 管线（dailyDigest normalizeDigestResult）对齐：
+    // 未输出时保持 undefined，让写入层取默认/继承旧值，不要强行归零。
+    emotional: typeof raw.emotional === "number" ? clampScore(raw.emotional, 0) : undefined,
+    recurrence: typeof raw.recurrence === "number" ? clampScore(raw.recurrence, 0) : undefined,
+    unresolved: typeof raw.unresolved === "number" ? clampScore(raw.unresolved, 0) : undefined,
     tags: readStringArray(raw.tags),
     source_message_ids: readStringArray(raw.source_message_ids),
     fact_key: readString(raw.fact_key) ?? undefined
@@ -211,6 +216,7 @@ function buildExtractPrompt(messages: MessageRecord[]): string {
     "- 关于用户的记忆，优先写成“你……”。关于我应遵守的长期方式，写成“我需要……”。",
     "- 每条 content 必须是一句自然短句。",
     "- 稳定事实必须尽量给 fact_key，格式为小写 ASCII，例如 project:aelios-memory-v2、preference:answer-style、boundary:no-system-records。",
+    "- 可选字段 emotional(0-1 情感强度)、recurrence(0-1 复现概率)、unresolved(0-1 未解决程度)；只在有明确判据时填写，否则省略让系统取默认值。",
     "",
     "输出格式：",
     JSON.stringify({
@@ -221,6 +227,9 @@ function buildExtractPrompt(messages: MessageRecord[]): string {
           fact_key: "project:aelios-memory-v2-write-pipeline",
           importance: 0.86,
           confidence: 0.92,
+          emotional: 0.2,
+          recurrence: 0.6,
+          unresolved: 0.4,
           tags: ["project", "aelios"],
           source_message_ids: ["msg_x"]
         }
@@ -339,6 +348,9 @@ async function persistCandidate(
         newFactKey: factKey,
         importance: input.memory.importance,
         confidence: input.memory.confidence,
+        emotional: input.memory.emotional,
+        recurrence: input.memory.recurrence,
+        unresolved: input.memory.unresolved,
         tags: input.memory.tags,
         source: "extract",
         sourceMessageIds,
@@ -385,6 +397,9 @@ async function persistCandidate(
     content: input.memory.content,
     importance: input.memory.importance,
     confidence: input.memory.confidence,
+    emotional: input.memory.emotional,
+    recurrence: input.memory.recurrence,
+    unresolved: input.memory.unresolved,
     tags: input.memory.tags,
     source: "extract",
     sourceMessageIds,

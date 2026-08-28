@@ -2,6 +2,7 @@ import type { Env, MemoryApiRecord, MemoryRecord } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { createEmbedding } from "./embedding";
+import { computeWeight } from "../db/v2";
 
 type MetadataMap = Record<string, unknown>;
 
@@ -12,6 +13,9 @@ export interface VectorMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   pinned?: boolean;
   tags?: string[];
   source?: string | null;
@@ -221,10 +225,15 @@ function toMemoryRecord(input: Required<VectorMemoryInput> & { id: string; vecto
     summary: input.summary,
     importance: input.importance,
     confidence: input.confidence,
-    emotional: 0,
-    recurrence: 0,
-    unresolved: 0,
-    weight: input.importance * 0.35, // only importance contributes when dims not set
+    emotional: input.emotional,
+    recurrence: input.recurrence,
+    unresolved: input.unresolved,
+    weight: computeWeight({
+      importance: input.importance,
+      emotional: input.emotional,
+      recurrence: input.recurrence,
+      unresolved: input.unresolved
+    }),
     status: "active",
     pinned: input.pinned ? 1 : 0,
     tags: JSON.stringify(input.tags),
@@ -235,7 +244,10 @@ function toMemoryRecord(input: Required<VectorMemoryInput> & { id: string; vecto
     recall_count: 0,
     created_at: input.createdAt,
     updated_at: input.updatedAt,
-    expires_at: input.expiresAt
+    expires_at: input.expiresAt,
+    role_id: input.roleId,
+    role_name: input.roleName,
+    role_scope: input.roleScope
   };
 }
 
@@ -244,8 +256,9 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
     .prepare(
       `INSERT INTO memories (
         id, namespace, type, content, summary, importance, confidence, emotional, recurrence, unresolved, weight,
-        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        role_id, role_name, role_scope
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -267,7 +280,10 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
       record.vector_id,
       record.created_at,
       record.updated_at,
-      record.expires_at
+      record.expires_at,
+      record.role_id ?? null,
+      record.role_name ?? null,
+      record.role_scope ?? "shared"
     );
 
   if (!isLifecycleEnabled(env)) {
@@ -279,10 +295,10 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
     .prepare(
       `INSERT OR IGNORE INTO memory_lifecycle (
         memory_id, namespace, fact_key, supersedes_id, superseded_by_id,
-        review_reason, valid_as_of, last_seen_at, seen_count, last_injected_at
-      ) VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?, 0, NULL)`
+        review_reason, valid_as_of, last_seen_at, seen_count, last_injected_at, role_scope
+      ) VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?, 0, NULL, ?)`
     )
-    .bind(record.id, record.namespace, record.created_at);
+    .bind(record.id, record.namespace, record.created_at, record.role_scope ?? "shared");
 
   await env.DB.batch([memoryInsert, lifecycleInsert]);
 }
@@ -390,6 +406,9 @@ export async function createVectorMemory(env: Env, input: VectorMemoryInput): Pr
     summary: input.summary ?? null,
     importance: clampScore(input.importance, 0.5),
     confidence: clampScore(input.confidence, 0.8),
+    emotional: clampScore(input.emotional, 0),
+    recurrence: clampScore(input.recurrence, 0),
+    unresolved: clampScore(input.unresolved, 0),
     pinned: Boolean(input.pinned),
     tags: input.tags ?? [],
     source: input.source ?? null,
@@ -462,6 +481,9 @@ export async function deleteVectorMemory(env: Env, id: string): Promise<boolean>
               summary: existing.summary ?? null,
               importance: existing.importance,
               confidence: existing.confidence,
+              emotional: existing.emotional ?? 0,
+              recurrence: existing.recurrence ?? 0,
+              unresolved: existing.unresolved ?? 0,
               pinned: existing.pinned,
               tags: existing.tags,
               source: existing.source ?? null,
@@ -502,6 +524,16 @@ export async function updateVectorMemory(
   const existing = await getVectorMemory(env, id);
   if (!existing) return null;
 
+  // getVectorMemory 优先从向量 metadata 构造记录，那里没存四维（emotional/
+  // recurrence/unresolved/weight 硬编码 0）。四维以 D1 为准，必须回读本体，
+  // 否则更新一次就把记录期的维度数据清零。
+  const d1Row = await getMemoryRecordById(env, existing.id);
+  const dims = {
+    emotional: d1Row?.emotional ?? existing.emotional ?? 0,
+    recurrence: d1Row?.recurrence ?? existing.recurrence ?? 0,
+    unresolved: d1Row?.unresolved ?? existing.unresolved ?? 0
+  };
+
   const content = (patch.content ?? existing.content).trim();
   if (!content) return null;
 
@@ -517,6 +549,9 @@ export async function updateVectorMemory(
     summary: patch.summary === undefined ? existing.summary : patch.summary,
     importance: clampScore(patch.importance, existing.importance),
     confidence: clampScore(patch.confidence, existing.confidence),
+    emotional: dims.emotional,
+    recurrence: dims.recurrence,
+    unresolved: dims.unresolved,
     status: patch.status ?? existing.status,
     pinned: patch.pinned ?? existing.pinned,
     tags: patch.tags ?? existing.tags,
@@ -540,10 +575,11 @@ export async function updateVectorMemory(
     summary: next.summary,
     importance: next.importance,
     confidence: next.confidence,
-    emotional: existing.emotional ?? 0,
-    recurrence: existing.recurrence ?? 0,
-    unresolved: existing.unresolved ?? 0,
-    weight: existing.weight ?? 0,
+    emotional: dims.emotional,
+    recurrence: dims.recurrence,
+    unresolved: dims.unresolved,
+    // importance 可能被 patch 改动，weight 随之重算（与 db/memories.updateMemory 对齐）
+    weight: computeWeight({ importance: next.importance, ...dims }),
     status: next.status,
     pinned: next.pinned ? 1 : 0,
     tags: JSON.stringify(next.tags),
