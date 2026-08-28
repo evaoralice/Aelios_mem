@@ -33,6 +33,10 @@ export interface AnthropicToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
   content: string | Array<{ type: "text"; text: string }>;
+  cache_control?: {
+    type: "ephemeral";
+    ttl?: "5m" | "1h";
+  };
 }
 
 export type AnthropicContentBlock =
@@ -209,7 +213,15 @@ export function assembledToAnthropicMessages(
  * message corresponding to the assembled message at breakpoint.message_index,
  * using the index mapping produced by assembledToAnthropicMessages.
  *
- * block_index defaults to the last content block if not specified.
+ * block_index is computed against the ASSEMBLED message content and may not
+ * survive wire conversion: multimodal arrays are stringified into a single
+ * text block, and consecutive same-role messages are merged. If block_index
+ * doesn't land on a markable block, fall back to the LAST markable block in
+ * the wire message instead of silently dropping the breakpoint (a dropped
+ * tail breakpoint costs a cache miss on the whole message prefix).
+ *
+ * Markable blocks: text and tool_result (Anthropic allows cache_control on
+ * both), so tool-turn tails still get their breakpoint.
  */
 export function applyMessageCacheBreakpoints(
   wireMessages: AnthropicWireMessage[],
@@ -217,6 +229,11 @@ export function applyMessageCacheBreakpoints(
   indexMap: Map<number, number>,
   cacheControl: { type: "ephemeral"; ttl?: "5m" | "1h" }
 ): void {
+  const isMarkable = (
+    block: AnthropicContentBlock | undefined
+  ): block is AnthropicTextBlock | AnthropicToolResultBlock =>
+    block != null && (block.type === "text" || block.type === "tool_result");
+
   for (const bp of breakpoints) {
     if (bp.target !== "message") continue;
     if (bp.message_index == null) continue;
@@ -225,9 +242,20 @@ export function applyMessageCacheBreakpoints(
     const msg = wireMessages[wireIdx];
     if (!msg || msg.content.length === 0) continue;
 
-    const blockIdx = bp.block_index ?? msg.content.length - 1;
-    const block = msg.content[blockIdx];
-    if (block && block.type === "text") {
+    let block: AnthropicTextBlock | AnthropicToolResultBlock | undefined;
+    const requested = bp.block_index != null ? msg.content[bp.block_index] : undefined;
+    if (isMarkable(requested)) {
+      block = requested;
+    } else {
+      for (let i = msg.content.length - 1; i >= 0; i -= 1) {
+        const candidate = msg.content[i];
+        if (isMarkable(candidate)) {
+          block = candidate;
+          break;
+        }
+      }
+    }
+    if (block) {
       block.cache_control = cacheControl;
     }
   }
