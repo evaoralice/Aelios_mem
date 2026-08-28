@@ -2493,7 +2493,8 @@ function simulateExpireOldMemories(records, cutoff) {
       !r.pinned &&
       r.type !== "identity" &&
       r.type !== "persona" &&
-      r.updated_at < cutoff
+      r.updated_at < cutoff &&
+      (r.last_recalled_at == null || r.last_recalled_at < cutoff)
     ) {
       return { ...r, status: "expired" };
     }
@@ -2613,6 +2614,19 @@ check("active memory younger than 180 days stays active", () => {
   ];
   const result = simulateExpireOldMemories(records, cutoff);
   assert.strictEqual(result[0].status, "active");
+});
+
+check("recently recalled memory is not expired even if updated_at is old", () => {
+  const cutoff = daysAgo(MEMORY_ACTIVE_EXPIRY_DAYS);
+  const records = [
+    { id: "mr1", type: "note", status: "active", pinned: 0, updated_at: daysAgo(200), last_recalled_at: daysAgo(5) },
+    { id: "mr2", type: "note", status: "active", pinned: 0, updated_at: daysAgo(200), last_recalled_at: daysAgo(200) },
+    { id: "mr3", type: "note", status: "active", pinned: 0, updated_at: daysAgo(200), last_recalled_at: null },
+  ];
+  const result = simulateExpireOldMemories(records, cutoff);
+  assert.strictEqual(result[0].status, "active", "recently recalled memory must stay active");
+  assert.strictEqual(result[1].status, "expired", "stale recall does not keep memory alive");
+  assert.strictEqual(result[2].status, "expired", "never recalled + stale update expires");
 });
 
 check("already deleted memory is not touched by expireOldMemories", () => {
