@@ -278,7 +278,7 @@ async function callExtractModel(env: Env, messages: MessageRecord[]): Promise<Ex
 
 async function findEmbeddingDuplicate(
   env: Env,
-  input: { namespace: string; type: string; content: string; threshold: number }
+  input: { namespace: string; type: string; content: string; threshold: number; roleScope: string }
 ): Promise<{ id: string; score: number } | null> {
   if (!env.VECTORIZE) return null;
   const vector = await createEmbedding(env, input.content);
@@ -298,6 +298,13 @@ async function findEmbeddingDuplicate(
   for (const match of matches) {
     if ((match.score ?? 0) < input.threshold) continue;
     const metadata = (match.metadata ?? {}) as Record<string, unknown>;
+    // 写入判重必须分角色（跨角色召回是特性，但角色 A 的新记忆不能因为
+    // 与 shared/角色 B 的记忆相似就被丢弃）。旧向量可能缺 role_scope
+    // 元数据，缺省按 shared 处理，与 fact_key 路径的 scope 语义一致。
+    const matchScope = typeof metadata.role_scope === "string" && metadata.role_scope
+      ? metadata.role_scope
+      : "shared";
+    if (matchScope !== input.roleScope) continue;
     const id = typeof metadata.ref_id === "string" ? metadata.ref_id : null;
     if (id) return { id, score: match.score ?? 0 };
   }
@@ -384,7 +391,8 @@ async function persistCandidate(
     namespace: input.namespace,
     type: input.memory.type,
     content: input.memory.content,
-    threshold: input.dedupCosine
+    threshold: input.dedupCosine,
+    roleScope
   });
   if (duplicate) {
     await markMemorySeen(env.DB, { namespace: input.namespace, id: duplicate.id });
@@ -470,32 +478,67 @@ export async function runMemoryExtractionWindow(
     return { ran: false, mode: "extract", reason: "no_messages", windowEndIso: endIso, cursor };
   }
 
-  const modelResult = await callExtractModel(env, messages);
-  if (modelResult.reason) {
+  // P2-8: 按 role_scope 分组提取（对齐 dream 的角色分组）。
+  // 之前整个 4h 窗口的记忆全部归到"最后一条 user 消息"的角色，
+  // 多角色混聊窗口会记错归属。窗口内通常只有一个角色，分组不会
+  // 明显增加模型调用；多角色时每组独立调用并各自归属。
+  interface RoleGroup {
+    roleId: string | null;
+    roleName: string | null;
+    messages: MessageRecord[];
+  }
+  const groups = new Map<string, RoleGroup>();
+  for (const message of messages) {
+    const scope = computeRoleScope(message.role_id ?? null, message.role_name ?? null);
+    let group = groups.get(scope);
+    if (!group) {
+      group = { roleId: message.role_id ?? null, roleName: message.role_name ?? null, messages: [] };
+      groups.set(scope, group);
+    }
+    group.messages.push(message);
+  }
+
+  let extractedCandidates = 0;
+  const totals: PersistStats = { created: 0, superseded: 0, duplicate: 0, queued: 0, failed: 0 };
+  let firstFailure: { reason: NonNullable<ExtractModelResult["reason"]>; model?: string; status?: number } | null = null;
+
+  for (const group of groups.values()) {
+    const modelResult = await callExtractModel(env, group.messages);
+    if (modelResult.reason) {
+      // 任一组模型失败：不推 cursor，让整个窗口下次重试（组级去重能兜住已写入的组）。
+      if (!firstFailure) {
+        firstFailure = { reason: modelResult.reason, model: modelResult.model, status: modelResult.status };
+      }
+      continue;
+    }
+    extractedCandidates += modelResult.memories.length;
+    const persisted = await persistCandidates(env, {
+      namespace,
+      memories: modelResult.memories,
+      fallbackMessageIds: group.messages.map((m) => m.id),
+      roleId: group.roleId,
+      roleName: group.roleName
+    });
+    totals.created += persisted.created;
+    totals.superseded += persisted.superseded;
+    totals.duplicate += persisted.duplicate;
+    totals.queued += persisted.queued;
+    totals.failed += persisted.failed;
+  }
+
+  if (firstFailure) {
     return {
       ran: false,
       mode: "extract",
-      reason: modelResult.reason,
+      reason: firstFailure.reason,
       windowEndIso: endIso,
       cursor,
       processedMessages: messages.length,
-      model: modelResult.model,
-      status: modelResult.status
+      model: firstFailure.model,
+      status: firstFailure.status
     };
   }
 
-  const messageIds = messages.map((message) => message.id);
-  // Derive role from the most recent user message in the batch
-  const lastRoleMessage = [...messages].reverse().find((m) => m.role === "user");
-  const roleId = lastRoleMessage?.role_id ?? null;
-  const roleName = lastRoleMessage?.role_name ?? null;
-  const persisted = await persistCandidates(env, {
-    namespace,
-    memories: modelResult.memories,
-    fallbackMessageIds: messageIds,
-    roleId,
-    roleName
-  });
   const lastMessage = messages[messages.length - 1];
   await writeCursor(env.DB, cursorName, lastMessage.created_at);
   if (!hasMore) await writeCursor(env.DB, doneName, `done:${lastMessage.created_at}`);
@@ -506,12 +549,12 @@ export async function runMemoryExtractionWindow(
     stats: {
       windowEndIso: endIso,
       processedMessages: messages.length,
-      extractedCandidates: modelResult.memories.length,
-      created: persisted.created,
-      superseded: persisted.superseded,
-      duplicate: persisted.duplicate,
-      queued: persisted.queued,
-      failed: persisted.failed,
+      extractedCandidates,
+      created: totals.created,
+      superseded: totals.superseded,
+      duplicate: totals.duplicate,
+      queued: totals.queued,
+      failed: totals.failed,
       cursorAdvanced: true,
       hasMore
     }
