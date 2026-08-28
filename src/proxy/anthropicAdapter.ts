@@ -285,19 +285,34 @@ function buildSyntheticContext(
 
 function splitDynamicMemorySystemBlock(
   assembled: AssembledPrompt
-): { systemBlocks: AssembledPrompt["system_blocks"]; dynamicMemoryPatch: string | null } {
-  const idx = assembled.meta.block_ids.indexOf("dynamic_memory_patch");
-  if (idx < 0 || idx >= assembled.system_blocks.length) {
-    return { systemBlocks: assembled.system_blocks, dynamicMemoryPatch: null };
+): {
+  systemBlocks: AssembledPrompt["system_blocks"];
+  dynamicMemoryPatch: string | null;
+  volatileContext: string | null;
+} {
+  // Remove per-request-dynamic blocks from the system array so they can be
+  // re-injected AFTER all cache breakpoints:
+  // - dynamic_memory_patch: RAG hits, changes every request
+  // - client_volatile_context: frontend time/date lines, changes every minute.
+  //   Leaving it in system keeps it inside the prefix of the message-level tail
+  //   breakpoint and makes that breakpoint miss (and pay cache-write) on every
+  //   request — defeating the whole point of splitting the memory patch out.
+  const removeIds = new Set(["dynamic_memory_patch", "client_volatile_context"]);
+  const systemBlocks: AssembledPrompt["system_blocks"] = [];
+  let dynamicMemoryPatch: string | null = null;
+  let volatileContext: string | null = null;
+
+  for (let i = 0; i < assembled.system_blocks.length; i += 1) {
+    const id = assembled.meta.block_ids[i];
+    if (removeIds.has(id)) {
+      if (id === "dynamic_memory_patch") dynamicMemoryPatch = assembled.system_blocks[i].text;
+      else volatileContext = assembled.system_blocks[i].text;
+      continue;
+    }
+    systemBlocks.push(assembled.system_blocks[i]);
   }
 
-  return {
-    systemBlocks: [
-      ...assembled.system_blocks.slice(0, idx),
-      ...assembled.system_blocks.slice(idx + 1),
-    ],
-    dynamicMemoryPatch: assembled.system_blocks[idx].text,
-  };
+  return { systemBlocks, dynamicMemoryPatch, volatileContext };
 }
 
 // ---------------------------------------------------------------------------
@@ -631,10 +646,11 @@ export async function buildAnthropicNativeRequest(
 //
 //   1. tools (last tool): cache_control on the last tool definition.
 //      Tool definitions must be stable (no dates, no timestamps).
-//   2. system (persona_pinned): cache_control on persona_pinned block.
-//      This is the most stable content. boot_stable (glossary, digest)
-//      is OUTSIDE the cache prefix — it changes daily.
-//   3. boot_stable (system): digest + recent_logs + glossary — stable within a day.
+//   2. system (cache anchor): cache_control on the client_system block
+//      (CACHE_ANCHOR_AFTER_ID). Prefix covers proxy_static_rules +
+//      persona_pinned + preset_lite + client_system.
+//   3. boot_stable (system): digest + recent_logs + glossary — stable
+//      within a day, cached by its own breakpoint (daily invalidation).
 //   4. tail (message): last stable block before dynamic content.
 //      Default mode A: last block of the message before current_user.
 //      Opt-in mode B: first text block of current_user.
@@ -690,7 +706,7 @@ export function buildAnthropicRequestFromAssembled(
     thinking = undefined;
   }
 
-  const { systemBlocks, dynamicMemoryPatch } = splitDynamicMemorySystemBlock(assembled);
+  const { systemBlocks, dynamicMemoryPatch, volatileContext } = splitDynamicMemorySystemBlock(assembled);
   const system = assembledToAnthropicSystem(systemBlocks);
 
   // Phase 4: MEMORY_INJECTION_MODE controls how dynamic memory is injected.
@@ -708,6 +724,11 @@ export function buildAnthropicRequestFromAssembled(
 
   // Apply explicit cache breakpoints (system + message level)
   applyExplicitCacheBreakpoints(system, messages, indexMap, assembled, env);
+
+  // client_volatile_context (frontend time/date lines): always append AFTER
+  // all cache breakpoints. Keeping it in system would sit inside the tail
+  // breakpoint's prefix and bust it every request.
+  appendUncachedUserContext(messages, volatileContext);
 
   // dynamic_memory_patch: in text mode, append AFTER all cache breakpoints.
   // In toolcall mode, synthetic messages are already appended by assembledToAnthropicMessages.

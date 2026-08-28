@@ -1561,23 +1561,29 @@ function appendUncachedUserContext(messages, text) {
 }
 
 function splitDynamicMemorySystemBlock(assembled) {
-  const idx = assembled.meta.block_ids.indexOf("dynamic_memory_patch");
-  if (idx < 0 || idx >= assembled.system_blocks.length) {
-    return { systemBlocks: assembled.system_blocks, dynamicMemoryPatch: null };
+  // Mirrors src/proxy/anthropicAdapter.ts: dynamic_memory_patch AND
+  // client_volatile_context are both removed from system and re-injected
+  // after all cache breakpoints (volatile time lines would bust the tail
+  // message-level breakpoint every request otherwise).
+  const removeIds = new Set(["dynamic_memory_patch", "client_volatile_context"]);
+  const systemBlocks = [];
+  let dynamicMemoryPatch = null;
+  let volatileContext = null;
+  for (let i = 0; i < assembled.system_blocks.length; i += 1) {
+    const id = assembled.meta.block_ids[i];
+    if (removeIds.has(id)) {
+      if (id === "dynamic_memory_patch") dynamicMemoryPatch = assembled.system_blocks[i].text;
+      else volatileContext = assembled.system_blocks[i].text;
+      continue;
+    }
+    systemBlocks.push(assembled.system_blocks[i]);
   }
-
-  return {
-    systemBlocks: [
-      ...assembled.system_blocks.slice(0, idx),
-      ...assembled.system_blocks.slice(idx + 1),
-    ],
-    dynamicMemoryPatch: assembled.system_blocks[idx].text,
-  };
+  return { systemBlocks, dynamicMemoryPatch, volatileContext };
 }
 
 function buildAnthropicRequestFromAssembled(req, targetModel, assembled, env) {
   const thinking = buildThinkingConfig(env, req);
-  const { systemBlocks, dynamicMemoryPatch } = splitDynamicMemorySystemBlock(assembled);
+  const { systemBlocks, dynamicMemoryPatch, volatileContext } = splitDynamicMemorySystemBlock(assembled);
   const system = assembledToAnthropicSystem(systemBlocks);
   applyCacheOverrides(system, env);
   const messages = assembledToAnthropicMessages(assembled.messages);
@@ -1585,7 +1591,8 @@ function buildAnthropicRequestFromAssembled(req, targetModel, assembled, env) {
   if (env.ANTHROPIC_ROLLING_CACHE_ENABLED === "true") {
     applyRollingMessageCache(messages, env, system);
   }
-  // dynamic_memory_patch AFTER all breakpoints as uncached user context
+  // volatile context + dynamic_memory_patch AFTER all breakpoints as uncached user context
+  appendUncachedUserContext(messages, volatileContext);
   appendUncachedUserContext(messages, dynamicMemoryPatch);
   return {
     model: targetModel.replace(/^anthropic\//i, ""),

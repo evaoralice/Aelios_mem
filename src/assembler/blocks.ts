@@ -512,7 +512,9 @@ export function assemble(ctx: AssemblerContext): AssembledPrompt {
   // Each looks back up to 20 content blocks for a previous cache entry.
   //
   // Breakpoint 1 (tools): applied in adapter if tool definitions are stable.
-  // Breakpoint 2 (system): persona_pinned — the most stable content (cache anchor).
+  // Breakpoint 2 (system): the cache_anchor block — client_system
+  //   (see CACHE_ANCHOR_AFTER_ID in types.ts). Prefix covers
+  //   proxy_static_rules + persona_pinned + preset_lite + client_system.
   // Breakpoint 3 (boot_stable): digest + recent_logs + glossary — stable within a day.
   // Breakpoint 4 (tail): last stable block before dynamic content.
   //   Mode A (default): last block of the message before current_user.
