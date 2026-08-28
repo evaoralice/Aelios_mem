@@ -44,6 +44,9 @@ node scripts/verify-extract-pipeline.mjs
 - `CHAT_MODEL` 已从 `[vars]` 移除，由 Worker 现有配置持有（`keep_vars = true` 保留）；改模型直接改 Dashboard 变量，不要写回 wrangler.toml
 - `workers_dev = false` 已显式写入，防止部署时自动启用 `*.workers.dev` 子域名
 - `DREAM_WRITE_DAILY_LOG` 默认 true，设 false 可阻止 dream 覆盖手写日志
+- `MEMORY_AUTO_DELETE` 默认关闭：retention cron 不再硬删终态记忆（只报告候选数），显式设 true 才恢复 365 天硬删
+- 常被召回的记忆不会因 180 天未编辑而过期（`last_recalled_at` 也算续命）
+- 客户端时间/日期行（volatile context）由 adapter 注入到消息尾部（缓存断点之后），不在 system 数组里
 - D1 的 ALTER TABLE 不支持 IF NOT EXISTS，迁移只能跑一次
 - 迁移 0009（daily_log.affect_chord）和 0010（memories 四维权重）部署后需回填旧数据 weight：
   ```sql
