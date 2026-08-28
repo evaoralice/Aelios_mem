@@ -21,7 +21,7 @@ import {
   markPreciousInjected
 } from "../../db/v2";
 import { searchMemories } from "../search";
-import { filterAndCompressMemories } from "../filter";
+import { filterAndCompressMemoriesWithMeta } from "../filter";
 import { createEmbedding } from "../embedding";
 import type { Env, MemoryApiRecord } from "../../types";
 import { isRoleMemoryEnabled, computeRoleScope } from "../../utils/role";
@@ -434,10 +434,16 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   const roleBoostName = readRoleBoostName(env);
   const requestRoleId = input.role_id ?? null;
   const requestRoleName = input.role_name ?? null;
-  const memories = await filterAndCompressMemories(env, {
+  const filterResult = await filterAndCompressMemoriesWithMeta(env, {
     query,
     memories: rawMemories
   });
+  const memories = filterResult.data;
+  // P2-7: 区分"过滤后确实为空"和"过滤失败(fail-closed 返回 [])"。
+  // 失败时不允许落 longtail 兜底——模型故障时给用户注入回收站内容
+  // 比"没有记忆"更糟（召回要准确，宁缺毋滥）。
+  const filterFailed =
+    filterResult.meta.status === "error" && !filterResult.meta.fallback_used && memories.length === 0;
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)
   //    source 加权 + role 加权 (full boost applied here, pre-boost was in step 2.1)
@@ -504,8 +510,9 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   // 5. 长尾兜底 (L6): 只有 glossary + memories 闸二后全空才落 longtail。
   //    母帖逻辑优先级"全空才落长尾"——glossary 命中也算"前面非空"，
   //    有确定词面答案时不再追兜底，避免把 longtail 混进已有黑话答案的请求。
+  //    过滤管线失败（fail-closed 清空）不算"真空"，不落兜底（P2-7）。
   let longtailHits: RecallHit[] = [];
-  if (afterDedup.length === 0 && glossaryHits.length === 0) {
+  if (afterDedup.length === 0 && glossaryHits.length === 0 && !filterFailed) {
     longtailHits = await recallLongtailFallback(env, input);
   }
 
