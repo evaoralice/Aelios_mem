@@ -9,9 +9,14 @@ vi.mock("../../src/memory/vectorStore", () => ({
   getVectorMemory: vi.fn(async () => null),
   listVectorMemories: vi.fn(async () => ({ data: [], cursor: null, hasMore: false })),
 }));
-vi.mock("../../src/memory/filter", () => ({
-  filterAndCompressMemories: vi.fn(async (_env: any, input: { memories: any[] }) => input.memories),
-}));
+vi.mock("../../src/memory/filter", () => {
+  const filterAndCompressMemories = vi.fn(async (_env: any, input: { memories: any[] }) => input.memories);
+  const filterAndCompressMemoriesWithMeta = vi.fn(async (env: any, input: any) => ({
+    data: (await filterAndCompressMemories(env, input)) ?? [],
+    meta: { status: "success", provider: "workers-ai", model: "mock", raw_count: 0, candidate_count: 0, output_count: 0 },
+  }));
+  return { filterAndCompressMemories, filterAndCompressMemoriesWithMeta };
+});
 vi.mock("../../src/memory/export", () => ({
   exportMemories: vi.fn(async () => ({ data: [] })),
 }));

@@ -9,11 +9,15 @@ vi.mock("../../src/memory/search", () => ({
 }));
 
 // Mock filterAndCompressMemories to pass through with score.
-vi.mock("../../src/memory/filter", () => ({
-  filterAndCompressMemories: vi.fn(async (_env: any, input: { memories: any[] }) =>
-    input.memories.map((m) => ({ ...m, score: m.score ?? 0.5 }))
-  ),
-}));
+vi.mock("../../src/memory/filter", () => {
+  const filterAndCompressMemories = vi.fn(async (_env: any, input: { memories: any[] }) =>
+    input.memories.map((m: any) => ({ ...m, score: m.score ?? 0.5 })));
+  const filterAndCompressMemoriesWithMeta = vi.fn(async (env: any, input: any) => ({
+    data: (await filterAndCompressMemories(env, input)) ?? [],
+    meta: { status: "success", provider: "workers-ai", model: "mock", raw_count: 0, candidate_count: 0, output_count: 0 },
+  }));
+  return { filterAndCompressMemories, filterAndCompressMemoriesWithMeta };
+});
 
 // Mock embedding (not used in these tests but imported).
 vi.mock("../../src/memory/embedding", () => ({

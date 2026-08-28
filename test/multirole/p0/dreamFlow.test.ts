@@ -14,9 +14,14 @@ vi.mock("../../../src/memory/search", () => ({
   searchMemories: vi.fn(async () => []),
   toMemoryApiRecord: (r: any) => r,
 }));
-vi.mock("../../../src/memory/filter", () => ({
-  filterAndCompressMemories: vi.fn(async () => []),
-}));
+vi.mock("../../../src/memory/filter", () => {
+  const filterAndCompressMemories = vi.fn(async (_env?: any, _input?: any) => []);
+  const filterAndCompressMemoriesWithMeta = vi.fn(async (env: any, input: any) => ({
+    data: (await filterAndCompressMemories(env, input)) ?? [],
+    meta: { status: "success", provider: "workers-ai", model: "mock", raw_count: 0, candidate_count: 0, output_count: 0 },
+  }));
+  return { filterAndCompressMemories, filterAndCompressMemoriesWithMeta };
+});
 vi.mock("../../../src/memory/embedding", () => ({
   createEmbedding: vi.fn(async () => null),
 }));
