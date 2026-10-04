@@ -2,7 +2,7 @@
 
 ## 分支
 
-- 当前开发分支：`feat/memory-dimensions`
+- 当前开发分支：`fix/logic-review`（基于 `feat/memory-dimensions`；本地尚未推送）
 - 上游：`https://github.com/wusaki0723/Aelios.git`（remote `upstream`）
 
 ## 本地运行
@@ -15,7 +15,7 @@ npx wrangler dev    # 本地开发服务器
 
 ## 测试
 
-改代码后跑测试（目前 285 个测试，45 个文件）：
+改代码后跑测试（目前 298 个测试，46 个文件）：
 
 ```bash
 npx vitest run                    # 全量测试

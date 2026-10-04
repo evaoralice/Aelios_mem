@@ -36,10 +36,18 @@ interface AnthropicRequest {
   max_tokens: number;
   temperature?: number;
   stream?: boolean;
-  thinking?: {
-    type: "enabled";
-    budget_tokens: number;
-    display?: "summarized" | "omitted";
+  thinking?:
+    | {
+        type: "enabled";
+        budget_tokens: number;
+        display?: "summarized" | "omitted";
+      }
+    | {
+        type: "adaptive";
+        display?: "summarized" | "omitted";
+      };
+  output_config?: {
+    effort: AnthropicThinkingEffort;
   };
   system: AnthropicTextBlock[];
   messages: AnthropicMessage[];
@@ -47,6 +55,8 @@ interface AnthropicRequest {
   tool_choice?: AnthropicToolChoice;
   metadata?: { user_id: string };
 }
+
+type AnthropicThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 interface AnthropicResponse {
   id?: string;
@@ -316,7 +326,7 @@ function splitDynamicMemorySystemBlock(
 }
 
 // ---------------------------------------------------------------------------
-// Thinking config (unchanged)
+// Thinking config
 // ---------------------------------------------------------------------------
 
 function getMaxTokens(req: OpenAIChatRequest): number {
@@ -333,6 +343,57 @@ function clampThinkingBudget(value: unknown): number | null {
 function getEnvThinkingBudget(env: Env): number {
   const value = clampThinkingBudget(env.ANTHROPIC_THINKING_BUDGET);
   return value ?? 1024;
+}
+
+function parseThinkingEffort(value: unknown): AnthropicThinkingEffort | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "minimal") return "low";
+  if (normalized === "extra_high") return "xhigh";
+  if (normalized === "auto") return "high";
+  if (["low", "medium", "high", "xhigh", "max"].includes(normalized)) {
+    return normalized as AnthropicThinkingEffort;
+  }
+  return null;
+}
+
+function getAdaptiveThinkingEffort(env: Env, req: OpenAIChatRequest): AnthropicThinkingEffort {
+  // Legacy budget_tokens and adaptive effort control different things: the former is a
+  // hard thinking-token allowance, while effort steers the whole response. Anthropic
+  // documents no numeric conversion, so do not invent one here. Callers that need a
+  // specific adaptive level must send reasoning_effort/output_config.effort.
+  for (const source of [req, isRecord(req.extra_body) ? req.extra_body : null, isRecord(req.extraBody) ? req.extraBody : null]) {
+    if (!source) continue;
+    const outputConfig = isRecord(source.output_config) ? source.output_config : null;
+    const effort = parseThinkingEffort(outputConfig?.effort ?? source.reasoning_effort);
+    if (effort) return effort;
+  }
+  return parseThinkingEffort(env.ANTHROPIC_THINKING_EFFORT) ?? "high";
+}
+
+function getExplicitThinkingType(req: OpenAIChatRequest): "enabled" | "adaptive" | "disabled" | null {
+  for (const source of [req, isRecord(req.extra_body) ? req.extra_body : null, isRecord(req.extraBody) ? req.extraBody : null]) {
+    if (!source || !isRecord(source.thinking) || typeof source.thinking.type !== "string") continue;
+    const type = source.thinking.type.trim().toLowerCase();
+    if (type === "enabled" || type === "adaptive" || type === "disabled") return type;
+  }
+  return null;
+}
+
+function supportsAdaptiveThinking(model: string): boolean {
+  const normalized = stripAnthropicProviderPrefix(model).toLowerCase();
+  if (/claude-(?:opus|sonnet)-(?:4-(?:[6-9]|\d{2,})|[5-9](?:-|$))/.test(normalized)) {
+    return true;
+  }
+  return /claude-(?:fable|mythos)-(?:preview|[5-9](?:-|$))/.test(normalized);
+}
+
+function getConfiguredThinkingMode(env: Env): "auto" | "manual" | "adaptive" | "off" {
+  const mode = env.ANTHROPIC_THINKING_MODE?.trim().toLowerCase();
+  if (mode === "manual" || mode === "enabled") return "manual";
+  if (mode === "adaptive") return "adaptive";
+  if (mode === "off" || mode === "disabled" || mode === "none") return "off";
+  return "auto";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -421,11 +482,21 @@ function getRequestThinkingDirective(req: OpenAIChatRequest): { enabled?: boolea
   return {};
 }
 
-function buildThinkingConfig(env: Env, req: OpenAIChatRequest): AnthropicRequest["thinking"] | undefined {
-  const requestDirective = getRequestThinkingDirective(req);
-  if (requestDirective.enabled === false) return undefined;
+export function buildThinkingConfig(
+  env: Env,
+  req: OpenAIChatRequest,
+  targetModel: string
+): AnthropicRequest["thinking"] | undefined {
+  const explicitType = getExplicitThinkingType(req);
+  if (explicitType === "disabled") return undefined;
 
-  if (requestDirective.enabled === true || requestDirective.budget) {
+  if (explicitType === "adaptive") {
+    return { type: "adaptive", display: "summarized" };
+  }
+
+  const requestDirective = getRequestThinkingDirective(req);
+
+  if (explicitType === "enabled") {
     return {
       type: "enabled",
       budget_tokens: requestDirective.budget ?? getEnvThinkingBudget(env),
@@ -433,7 +504,27 @@ function buildThinkingConfig(env: Env, req: OpenAIChatRequest): AnthropicRequest
     };
   }
 
-  if (env.ANTHROPIC_THINKING_ENABLED !== "true") return undefined;
+  if (requestDirective.enabled === false) return undefined;
+
+  if (requestDirective.enabled === true || requestDirective.budget) {
+    if (supportsAdaptiveThinking(targetModel)) {
+      return { type: "adaptive", display: "summarized" };
+    }
+    return {
+      type: "enabled",
+      budget_tokens: requestDirective.budget ?? getEnvThinkingBudget(env),
+      display: "summarized",
+    };
+  }
+
+  const configuredMode = getConfiguredThinkingMode(env);
+  if (configuredMode === "off") return undefined;
+  if (env.ANTHROPIC_THINKING_ENABLED !== "true" && env.ANTHROPIC_THINKING_MODE === undefined) return undefined;
+
+  if (configuredMode === "adaptive" || (configuredMode === "auto" && supportsAdaptiveThinking(targetModel))) {
+    return { type: "adaptive", display: "summarized" };
+  }
+
   return {
     type: "enabled",
     budget_tokens: getEnvThinkingBudget(env),
@@ -447,7 +538,7 @@ function getAnthropicMaxTokens(
   thinking: AnthropicRequest["thinking"] | undefined
 ): number {
   const maxTokens = getMaxTokens(req);
-  if (!thinking) return maxTokens;
+  if (!thinking || thinking.type === "adaptive") return maxTokens;
   return Math.max(maxTokens, thinking.budget_tokens + Math.min(Math.max(maxTokens, 256), 4096));
 }
 
@@ -577,12 +668,15 @@ export async function buildAnthropicNativeRequest(
     recallHits: Array<{ type: string; content: string; score: number }>;
   }
 ): Promise<AnthropicRequest> {
-  let thinking = buildThinkingConfig(input.env, req);
+  let thinking = buildThinkingConfig(input.env, req, input.targetModel);
   const tools = openAIToolsToAnthropic(req.tools);
   const toolChoice = openAIToolChoiceToAnthropic(req.tool_choice);
   if (thinking && isForcedToolChoice(req.tool_choice)) {
     thinking = undefined;
   }
+  const outputConfig = thinking?.type === "adaptive"
+    ? { effort: getAdaptiveThinkingEffort(input.env, req) }
+    : undefined;
 
   const stableText = input.boot
     ? formatBootStable(input.boot)
@@ -627,6 +721,7 @@ export async function buildAnthropicNativeRequest(
     temperature: thinking ? undefined : typeof req.temperature === "number" ? req.temperature : undefined,
     stream: Boolean(req.stream),
     thinking,
+    ...(outputConfig ? { output_config: outputConfig } : {}),
     system,
     messages,
     ...(tools ? { tools } : {}),
@@ -698,13 +793,16 @@ export function buildAnthropicRequestFromAssembled(
   assembled: AssembledPrompt,
   env: Env
 ): AnthropicRequest {
-  let thinking = buildThinkingConfig(env, req);
+  let thinking = buildThinkingConfig(env, req, targetModel);
   const tools = openAIToolsToAnthropic(req.tools);
   const toolChoice = openAIToolChoiceToAnthropic(req.tool_choice);
   // Tool priority: disable thinking when forced tool_choice is present.
   if (thinking && isForcedToolChoice(req.tool_choice)) {
     thinking = undefined;
   }
+  const outputConfig = thinking?.type === "adaptive"
+    ? { effort: getAdaptiveThinkingEffort(env, req) }
+    : undefined;
 
   const { systemBlocks, dynamicMemoryPatch, volatileContext } = splitDynamicMemorySystemBlock(assembled);
   const system = assembledToAnthropicSystem(systemBlocks);
@@ -753,6 +851,7 @@ export function buildAnthropicRequestFromAssembled(
     temperature: thinking ? undefined : typeof req.temperature === "number" ? req.temperature : undefined,
     stream: Boolean(req.stream),
     thinking,
+    ...(outputConfig ? { output_config: outputConfig } : {}),
     system,
     messages,
     ...(cachedTools ? { tools: cachedTools } : {}),

@@ -4,4 +4,5 @@ node_modules/
 .env
 .wrangler-secrets.json
 backups/
+.backups/
 dist/

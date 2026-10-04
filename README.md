@@ -368,10 +368,19 @@ hard delete: deleted/superseded/expired 超 365 天 → 先删 Vectorize 再删 
 | `ANTHROPIC_ROLLING_CACHE_ENABLED` | `false` | 滚动打点 |
 | `ANTHROPIC_ROLLING_CACHE_WINDOW_SIZE` | `20` | 历史窗口 |
 | `ANTHROPIC_CACHE_USER_ID` | 空 | 多客户端 cache 隔离用 `metadata.user_id` |
-| `ANTHROPIC_THINKING_ENABLED` | `false` | 深度思考 |
-| `ANTHROPIC_THINKING_BUDGET` | `1024` | 思考 token（1024–32000） |
+| `ANTHROPIC_THINKING_ENABLED` | `false` | 旧版兼容开关；仅未配置 `ANTHROPIC_THINKING_MODE` 时生效 |
+| `ANTHROPIC_THINKING_MODE` | 未设置（兼容旧开关） | `auto` 对已知支持 adaptive 的模型自动选择新模式，其余沿用 manual；也可显式设 `adaptive` / `manual` / `off` |
+| `ANTHROPIC_THINKING_EFFORT` | `high` | adaptive thinking 强度：`low` / `medium` / `high` / `xhigh` / `max`（受模型支持范围限制） |
+| `ANTHROPIC_THINKING_BUDGET` | `1024` | manual thinking token 预算（1024–32000，仅旧模式） |
 | `FORCE_ANTHROPIC_NATIVE` | 空 | `true` 强制 Anthropic native |
 | `CUSTOM_ANTHROPIC_MESSAGES_PATH` | `messages` | 原生 messages 路径 |
+
+Adaptive thinking 迁移说明：
+
+- `budget_tokens` / `thinking_budget` 是 manual thinking 的固定 token 预算；`output_config.effort` 是 adaptive thinking 对整段输出的行为强度，两者没有官方的一一换算关系。
+- 对 Claude 4.6+，`auto` 模式不会把旧 budget 数值猜测成 effort。调用方显式传入的 `output_config.effort` 或 `reasoning_effort` 优先；否则使用 `ANTHROPIC_THINKING_EFFORT`（默认 `high`）。
+- 确实需要固定预算语义时，可显式选择 `manual`，但仅适用于仍接受 `thinking.type=enabled` 的模型；Claude 4.7+ 会拒绝 manual thinking。
+- 自动识别目前覆盖已知的 Opus/Sonnet 4.6+、Fable/Mythos 5+ 与 Mythos Preview 命名。渠道别名或未来新增模型族无法可靠识别时，使用 `ANTHROPIC_THINKING_MODE=adaptive` 显式指定。
 
 ### 记忆注入 / 召回加权
 
