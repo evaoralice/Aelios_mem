@@ -62,8 +62,8 @@ MEMORY_AUTHORED_BOOST = "1.15"
 WEEKLY_ROLLUP_DELETE_DAILIES = "false"
 MEMORY_RERANKER_MODEL = "workers-ai/@cf/baai/bge-reranker-base"
 VECTORIZE_INDEX_NAME = "memo-kb"
-EMBEDDING_MODEL = "workers-ai/@cf/baai/bge-m3"
-EMBEDDING_DIMENSIONS = "1024"
+EMBEDDING_MODEL = "workers-ai/@cf/google/embeddinggemma-300m"
+EMBEDDING_DIMENSIONS = "768"
 # messages 表保留天数；后台 retention 按 namespace 24h 节流清理。
 MESSAGES_RETENTION_DAYS = "7"
 DREAM_TIME_ZONE = "Asia/Singapore"
@@ -72,12 +72,13 @@ DREAM_MEMORY_CONTEXT_LIMIT = "40"
 DREAM_MAX_RUNS = "10"
 DREAM_MAX_TOKENS = "8000"
 # Dream 抽完候选后自动评审：靠谱的入库，没据的丢掉。设 false 才回到全人工。
-CANDIDATE_JUDGE_ENABLED = "true"
+CANDIDATE_JUDGE_ENABLED = "false"
+ENABLE_DIARY_WRITER = "false"
 # P8 两阶段发布的维护闸（部署时变量，/admin 不可覆盖）。deploy 用 --keep-vars，
 # 删掉这行不会清除远端旧值——上次推送的 "true" 会永久生效（服务全 503）。
 # 常驻此行、只改字面值：stage 1 冻结 = "true"，stage 2 解冻 = "false"（默认）。
 # 缺键或拼错会让 `npm run deploy` 在 setup 阶段直接失败（scripts/p8-deploy.mjs）。
-MAINTENANCE_MODE = "false"
+MAINTENANCE_MODE = "true"
 # GitHub daily archive pull（可选，默认禁用）。要用：去 Dashboard 手动加变量
 # GITHUB_DAILY_REPO（owner/repo）和 Secret GITHUB_DAILY_TOKEN（fine-grained PAT，
 # 只读目标仓库 Contents）；代码内默认路径 archive/daily，可用 GITHUB_DAILY_PATH 覆盖。
