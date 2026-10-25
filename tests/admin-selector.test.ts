@@ -196,3 +196,24 @@ test('late recall results and failures cannot cross an A-B-A identity switch', a
     assert.equal(app.recallHistoryLoading, false);
   }
 });
+
+test('P9 maintenance controls stay scoped to the selected namespace', async () => {
+  const { app } = panel();
+  app.namespace = 'shared';
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  app.request = async (path: string, options: any) => {
+    calls.push({ path, body: JSON.parse(options.body) });
+    return { ok: true, converged: false };
+  };
+  await app.runP9(true);
+  await app.runP9(false);
+  await app.runFtsReindex(true);
+  await app.runFtsReindex(false);
+  assert.deepEqual(calls, [
+    { path: '/v1/p9-reindex', body: { namespace: 'shared', dry_run: true } },
+    { path: '/v1/p9-reindex', body: { namespace: 'shared', dry_run: false } },
+    { path: '/v1/fts-reindex', body: { namespace: 'shared', rebuild: true } },
+    { path: '/v1/fts-reindex', body: { namespace: 'shared', rebuild: false } }
+  ]);
+  assert.match(ADMIN_HTML, /P8 迁移后索引修复/);
+});

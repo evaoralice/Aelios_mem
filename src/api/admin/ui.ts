@@ -666,6 +666,18 @@ document.documentElement.dataset.theme = localStorage.getItem('aelios.admin.colo
         </div>
 
         <div x-show="moreView === 'maintenance'" class="space-y-3">
+          <article class="rounded-2xl border border-coral/30 bg-zinc-900 p-4 shadow-sm">
+            <div class="mb-3">
+              <h3 class="text-sm font-semibold text-zinc-100">P8 迁移后索引修复</h3>
+              <p class="mt-1 text-xs leading-5 text-zinc-400">只处理当前空间 <span class="font-medium text-zinc-200" x-text="namespace"></span>；先审计，再修复。FTS 首次必须重建一次，之后点续跑直到 converged=true。</p>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <button type="button" @click="runP9(true)" class="tap rounded-2xl border border-zinc-800 px-4 py-2 text-sm hover:border-coral">① 向量审计</button>
+              <button type="button" @click="runP9(false)" class="tap rounded-2xl border border-zinc-800 px-4 py-2 text-sm hover:border-coral">② 修复向量</button>
+              <button type="button" @click="runFtsReindex(true)" class="tap rounded-2xl border border-zinc-800 px-4 py-2 text-sm hover:border-coral">③ FTS 首次重建</button>
+              <button type="button" @click="runFtsReindex(false)" class="tap rounded-2xl border border-zinc-800 px-4 py-2 text-sm hover:border-coral">④ FTS 续跑</button>
+            </div>
+          </article>
           <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
             <div class="grid gap-3 md:grid-cols-[1fr_auto_auto_auto_auto_auto]">
               <div class="self-center text-sm text-zinc-400">当前空间：<span x-text="namespace"></span></div>
@@ -2000,6 +2012,28 @@ function memoryAdmin() {
         const data = await this.request('/v1/vector-backfill', {
           method: 'POST',
           body: JSON.stringify({ namespace: this.namespace, limit: 50, dry_run: dryRun })
+        });
+        this.debugOutput = JSON.stringify(data, null, 2);
+      } catch (error) {
+        this.debugOutput = error.message;
+      }
+    },
+    async runP9(dryRun) {
+      try {
+        const data = await this.request('/v1/p9-reindex', {
+          method: 'POST',
+          body: JSON.stringify({ namespace: this.namespace, dry_run: dryRun })
+        });
+        this.debugOutput = JSON.stringify(data, null, 2);
+      } catch (error) {
+        this.debugOutput = error.message;
+      }
+    },
+    async runFtsReindex(rebuild) {
+      try {
+        const data = await this.request('/v1/fts-reindex', {
+          method: 'POST',
+          body: JSON.stringify({ namespace: this.namespace, rebuild })
         });
         this.debugOutput = JSON.stringify(data, null, 2);
       } catch (error) {
