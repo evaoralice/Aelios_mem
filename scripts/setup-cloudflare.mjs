@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ensureD1Migrations, resolveMaintenanceMode } from "./p8-deploy.mjs";
+import {
+  ensureD1Migrations,
+  resolveMaintenanceMode,
+  resolveVectorizeDimensions
+} from "./p8-deploy.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const wranglerTomlPath = resolve(root, "wrangler.toml");
@@ -33,7 +37,10 @@ const vectorizeName =
   process.env.CMP_VECTORIZE_NAME || readVectorizeValue("index_name") || "memo-kb";
 const vectorizeBinding =
   process.env.CMP_VECTORIZE_BINDING || readVectorizeValue("binding") || "VECTORIZE";
-const vectorizeDimensions = process.env.CMP_VECTORIZE_DIMENSIONS || "1024";
+const vectorizeDimensions = resolveVectorizeDimensions(
+  process.env,
+  readTomlSectionVar("vars", "EMBEDDING_DIMENSIONS")
+);
 const vectorizeMetric = process.env.CMP_VECTORIZE_METRIC || "cosine";
 const queueName = process.env.CMP_QUEUE_NAME || readTomlBlock("queues.producers")("queue") || "companion-memory";
 // Variables that are safe to persist as visible Worker config in wrangler.toml

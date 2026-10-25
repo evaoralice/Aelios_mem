@@ -9,6 +9,7 @@ import {
   expectedLedgerNames,
   ensureD1Migrations,
   resolveMaintenanceMode,
+  resolveVectorizeDimensions,
   P8_SQL_FILES
 } from "../scripts/p8-deploy.mjs";
 import type { WranglerRunner } from "../scripts/p8-deploy.mjs";
@@ -606,6 +607,17 @@ test("MAINTENANCE_MODE 契约：缺键/拼错/空值一律构建失败（--keep-
       `非法值 ${JSON.stringify(bad ?? null)} 应报可行动的错误`
     );
   }
+});
+
+test("Vectorize 维度跟随实际 embedding 配置，不把已有 768 维索引误判成上游默认 1024", () => {
+  assert.strictEqual(
+    resolveVectorizeDimensions({ CMP_VECTORIZE_DIMENSIONS: "1536", EMBEDDING_DIMENSIONS: "1024" }, "768"),
+    "1536",
+    "专用资源变量优先"
+  );
+  assert.strictEqual(resolveVectorizeDimensions({ EMBEDDING_DIMENSIONS: "1024" }, "768"), "1024");
+  assert.strictEqual(resolveVectorizeDimensions({}, "768"), "768", "wrangler.toml 运行期配置必须被资源检查沿用");
+  assert.strictEqual(resolveVectorizeDimensions({}, null), "1024", "全未配置才使用上游默认");
 });
 
 function markerCount(db: DatabaseSync): number {

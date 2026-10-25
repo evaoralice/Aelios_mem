@@ -97,6 +97,18 @@ export function resolveMaintenanceMode(raw) {
   );
 }
 
+// Vectorize 资源维度必须与 Worker 实际生成的 embedding 维度一致。专用的
+// CMP_* 构建变量优先；其次沿用构建环境显式给出的运行期变量；再读仓库里的
+// wrangler.toml [vars]。只有三者都未配置时才使用上游默认 1024。
+export function resolveVectorizeDimensions(env, configured) {
+  return (
+    env.CMP_VECTORIZE_DIMENSIONS?.trim() ||
+    env.EMBEDDING_DIMENSIONS?.trim() ||
+    configured?.trim() ||
+    "1024"
+  );
+}
+
 // —— P8 验证标记（fail-closed） ——
 //
 // 账本齐全只证明"执行过"，不证明"验证过"。postVerify 第一次失败后 P8 五条可能已

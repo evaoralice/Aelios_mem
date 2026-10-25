@@ -50,6 +50,10 @@ export declare const POST_VERIFY_SQL: string;
 
 export declare function classify(input: ClassifyInput): DbVerdict;
 export declare function resolveMaintenanceMode(raw: string | null | undefined): boolean;
+export declare function resolveVectorizeDimensions(
+  env: Record<string, string | undefined>,
+  configured: string | null | undefined
+): string;
 export declare function writeP8VerificationMarker(run: WranglerRunner, dbName: string): void;
 export declare function expectedLedgerNames(migrationNames: string[]): string[];
 export declare function postVerify(options: {

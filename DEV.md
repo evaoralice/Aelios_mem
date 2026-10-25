@@ -16,7 +16,7 @@ npx wrangler dev    # 本地开发服务器
 
 ## 测试
 
-改代码后跑测试（目前 382 个测试，node:test + tsx）：
+改代码后跑测试（目前 383 个测试，node:test + tsx）：
 
 ```bash
 npm test                                        # 全量测试
