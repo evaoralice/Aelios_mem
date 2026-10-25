@@ -11,6 +11,7 @@ import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 import { cleanMessageText } from "../utils/sanitize";
 import { findIdentity, identityNamespace, identityReadNamespaces, isMainModel, loadConfig, type GatewayConfig, type Identity, type Protocol } from "./config";
+import { formatBackgroundBlock, injectBackground, loadBackgroundContext } from "./background";
 import { appendMemory, classifyTurn, hasServerState, inputItems, recentHumanTexts, validateBody, visibleText, type Body } from "./protocol";
 import { RequestContractError } from "./request";
 import { dispatchExchange, persistHumanUtterance, observeResponse, prepareExchange } from "./record";
@@ -25,6 +26,12 @@ function memoryKind(source: string | null | undefined, type: string, authoredBy?
   if (source === "remember_now" || authoredBy) return "authored";
   if (source === "dream" || source === "judge" || source === "extract") return "distilled";
   return type;
+}
+
+/** 写入 ns 记忆的召回排序加成，沿用旧 RECALL_ROLE_BOOST 语义，默认 1.3；填 1 关闭。 */
+export function recallNamespaceBoost(env: Env): number {
+  const raw = Number(env.RECALL_ROLE_BOOST ?? "1.3");
+  return Number.isFinite(raw) && raw >= 1 ? raw : 1.3;
 }
 
 export async function recallPatch(
@@ -123,7 +130,9 @@ export async function recallPatch(
     for (const list of lists) if (list[i]) entries.push(list[i]);
   }
   const selection = await selectRecall(env, {
-    query, recent, visible: options.excludeVisibleIn, entries, maxItems: budget.maxItems
+    query, recent, visible: options.excludeVisibleIn, entries, maxItems: budget.maxItems,
+    // 跨 ns 可见时，写入 ns 的同等相关记忆排到 shared 前面（阶段 1 role boost 移植）。
+    boostNamespace: namespace, boostFactor: recallNamespaceBoost(env)
   });
   const assembled = assembleRecallSurface(selection.entries, {
     budget: identity.maxMemoryChars || 6000,
@@ -230,6 +239,24 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       error instanceof RequestContractError || error instanceof UpstreamRouteError ? 400 : 502);
   }
   if (prepared.removed.length) console.log("gateway request normalized", { protocol, removed: prepared.removed });
+  // 固定背景（baseline + 最近日记 + 今日 pending 回执）：主模型每轮都带，与动态召回独立。
+  // 工具续轮重发的是客户端自己的干净历史，背景每轮注入一次；客户端 system 已带旧背景
+  // 标记时（回放），不再往 system 追加，最新背景转投动态 patch 区，避免旧内容长期滞留。
+  let backgroundStatus = "off";
+  let backgroundPatch = "";
+  if (main && turn.kind !== "auxiliary") {
+    try {
+      const background = await loadBackgroundContext(env, identity);
+      const block = formatBackgroundBlock(background);
+      if (block) {
+        backgroundPatch = injectBackground(prepared.body, protocol, block) ? "" : block;
+        backgroundStatus = "injected";
+      } else backgroundStatus = "empty";
+    } catch (error) {
+      backgroundStatus = "unavailable";
+      console.error("gateway background unavailable", { identity: identity.slug, error });
+    }
+  }
   let patch = "";
   let memoryStatus = !main ? "off" : turn.kind !== "human" ? "skipped" : "empty";
   let rememberStatus = "none";
@@ -261,13 +288,16 @@ export async function handleGateway(request: Request, env: Env, ctx: ExecutionCo
       console.error("gateway recall unavailable", { identity: identity.slug, error });
     }
   }
-  const payload = appendMemory(prepared.body, protocol, patch);
+  // 回放场景转投的背景拼在召回 patch 前；没有召回时 patch 就是背景本身。
+  const finalPatch = backgroundPatch && patch ? `${backgroundPatch}\n\n${patch}` : backgroundPatch || patch;
+  const payload = appendMemory(prepared.body, protocol, finalPatch);
   if (protocol === "responses" && main) payload.store = false;
   try {
     const upstream = await callGatewayUpstream(env, protocol, request, prepared, payload);
     const headers = new Headers(upstream.headers);
     headers.set("x-aelios-identity", identity.slug);
     headers.set("x-aelios-memory", memoryStatus);
+    headers.set("x-aelios-background", backgroundStatus);
     headers.set("x-aelios-normalized", String(prepared.removed.length));
     headers.set("x-aelios-recall-id", recallId);
     headers.set("x-aelios-remember", rememberStatus);

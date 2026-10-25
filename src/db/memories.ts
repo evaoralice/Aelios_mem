@@ -1,6 +1,8 @@
 import type { MemoryLifecycleRow, MemoryRecord } from "../types";
 import { deleteFtsRow, searchFtsIds, upsertMemoryFts } from "../memory/fts";
 import { lexicalHitScore } from "../memory/queryShape";
+import { dimensionsForCreate, dimensionsForInherit, hasDimensionOverride } from "../extensions/memoryDimensions";
+import { MEMORY_DIMENSION_DEFAULTS } from "../extensions/memoryWeight";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
@@ -11,6 +13,9 @@ export interface CreateMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   status?: string;
   pinned?: boolean;
   tags?: string[];
@@ -39,6 +44,9 @@ export interface UpdateMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   status?: string;
   pinned?: boolean;
   tags?: string[];
@@ -50,14 +58,20 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
   const id = newId("mem");
   const now = nowIso();
   const vectorId = `mem_${id}`;
+  // 四维缺省走 create 路径默认值（0.5/0/0/0），weight = computeWeight（旧 db/memories.ts 语义）。
+  const dims = dimensionsForCreate(input, MEMORY_DIMENSION_DEFAULTS.create);
   const record: MemoryRecord = {
     id,
     namespace: input.namespace,
     type: input.type,
     content: input.content,
     summary: input.summary ?? null,
-    importance: input.importance ?? 0.5,
+    importance: dims.importance,
     confidence: input.confidence ?? 0.8,
+    emotional: dims.emotional,
+    recurrence: dims.recurrence,
+    unresolved: dims.unresolved,
+    weight: dims.weight,
     status: input.status ?? "active",
     pinned: input.pinned ? 1 : 0,
     tags: JSON.stringify(input.tags ?? []),
@@ -74,9 +88,9 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, summary, importance, confidence, status,
-        pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, namespace, type, content, summary, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -86,6 +100,10 @@ export async function createMemory(db: D1Database, input: CreateMemoryInput): Pr
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -285,6 +303,17 @@ export async function updateMemory(
   if (input.patch.summary !== undefined) set("summary", input.patch.summary);
   if (input.patch.importance !== undefined) set("importance", input.patch.importance);
   if (input.patch.confidence !== undefined) set("confidence", input.patch.confidence);
+  if (input.patch.emotional !== undefined) set("emotional", input.patch.emotional);
+  if (input.patch.recurrence !== undefined) set("recurrence", input.patch.recurrence);
+  if (input.patch.unresolved !== undefined) set("unresolved", input.patch.unresolved);
+  // 条件重算（裁定 #5）：至少显式提供一个四维字段才重算 weight，未提供的维度继承现有值；
+  // 纯文本更新不得顺手改变权重。旧 db/memories.ts updateMemory 同语义。
+  if (hasDimensionOverride(input.patch)) {
+    const existing = await getMemoryById(db, { namespace: input.namespace, id: input.id });
+    if (existing) {
+      set("weight", dimensionsForInherit(input.patch, existing).weight);
+    }
+  }
   if (input.patch.status !== undefined) set("status", input.patch.status);
   if (input.patch.pinned !== undefined) set("pinned", input.patch.pinned ? 1 : 0);
   if (input.patch.tags !== undefined) set("tags", JSON.stringify(input.patch.tags));

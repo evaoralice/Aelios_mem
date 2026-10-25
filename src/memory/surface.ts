@@ -37,6 +37,16 @@ function truncateEntry(text: string, maxChars: number): string {
   return `${text.slice(0, Math.max(maxChars - 1, 8)).trim()}…`;
 }
 
+/** 旧 formatRecallPatch 口径：只有 recorded_at 存在时才渲染 YYYY-MM-DD，缺日期不补。 */
+function recordedDateTag(date: string | null | undefined): string {
+  const value = date?.trim();
+  return value ? `[${value.slice(0, 10)}]` : "";
+}
+
+function linePrefix(entry: SurfaceEntry): string {
+  return `- [${entry.kind}]${recordedDateTag(entry.recordedDate)} `;
+}
+
 export function assembleRecallSurface(entries: SurfaceEntry[], options: SurfaceOptions = {}): AssembledSurface {
   const budget = options.budget ?? 6000;
   const maxItems = options.maxItems ?? entries.length;
@@ -52,7 +62,11 @@ export function assembleRecallSurface(entries: SurfaceEntry[], options: SurfaceO
         ...(entry.sourceIds?.length ? { sourceIds: entry.sourceIds } : {}),
         ...(entry.exact ? { exact: true } : {}),
         ...(entry.window !== undefined ? { window: entry.window } : {}),
-        ...(entry.purpose ? { purpose: entry.purpose } : {})
+        ...(entry.purpose ? { purpose: entry.purpose } : {}),
+        ...(entry.recordedDate ? { recordedDate: entry.recordedDate } : {}),
+        ...(entry.eventDate ? { eventDate: entry.eventDate } : {}),
+        ...(entry.factKey ? { factKey: entry.factKey } : {}),
+        ...(entry.speaker ? { speaker: entry.speaker } : {})
       };
     })
     .filter((entry) => entry.kind && entry.content);
@@ -69,11 +83,13 @@ export function assembleRecallSurface(entries: SurfaceEntry[], options: SurfaceO
     if (used.length >= Math.max(maxItems, 0)) break;
     const remaining = budget - overhead - usedChars;
     if (remaining <= 24) break;
-    if (entry.exact && entry.content.length + 4 > remaining) continue;
-    const content = entry.content.length + 4 > remaining
-      ? `${entry.content.slice(0, Math.max(remaining - 4, 8)).trim()}…`
+    const prefix = linePrefix(entry);
+    const prefixLength = prefix.length;
+    if (entry.exact && entry.content.length + prefixLength > remaining) continue;
+    const content = entry.content.length + prefixLength > remaining
+      ? `${entry.content.slice(0, Math.max(remaining - prefixLength - 1, 8)).trim()}…`
       : entry.content;
-    const line = `- ${content}`;
+    const line = prefix + content;
     lines.push(line);
     used.push({ ...entry, content });
     usedChars += line.length + 1;

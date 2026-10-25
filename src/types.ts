@@ -15,6 +15,15 @@ export interface Env {
   AI_GATEWAY_BASE_URL?: string;
   /** Comma-separated tool-definition fields to strip before every upstream send. */
   UPSTREAM_STRIP_TOOL_FIELDS?: string;
+  // P6 · Anthropic adaptive thinking（策略在 src/extensions/adaptiveThinking.ts，messages 协议主模型生效）
+  // auto/adaptive/manual/off；不填时走旧开关 ANTHROPIC_THINKING_ENABLED
+  ANTHROPIC_THINKING_MODE?: string;
+  // adaptive effort 强度 low/medium/high/xhigh/max，默认 high；不做 budget→effort 换算
+  ANTHROPIC_THINKING_EFFORT?: string;
+  // manual 预算 1024–32000，默认 1024
+  ANTHROPIC_THINKING_BUDGET?: string;
+  // 旧开关：true = 主模型默认开 thinking（按模型自动选 adaptive/manual）；仅 MODE 未填时生效
+  ANTHROPIC_THINKING_ENABLED?: string;
   CHATBOX_API_KEY?: string;
   IM_API_KEY?: string;
   DEBUG_API_KEY?: string;
@@ -36,6 +45,16 @@ export interface Env {
   RECALL_MIN_SCORE?: string;
   // E 轴: 亲笔记忆 (authored_by 非空) 的排序加成倍数，默认 1.15。只影响排序，不影响地板。
   MEMORY_AUTHORED_BOOST?: string;
+  // 跨 ns 召回时写入 ns 记忆的排序加成倍数（旧 RECALL_ROLE_BOOST 语义），默认 1.3；填 1 关闭。
+  RECALL_ROLE_BOOST?: string;
+  // baseline（角色长期印象）合并的目标软长度，超限 Dream 追加一次压缩请求，不硬截断。
+  BASELINE_MAX_CHARS_PER_ROLE?: string;
+  BASELINE_MAX_CHARS_TOTAL?: string;
+  // baseline 历史快照保留版本数（默认 7）。
+  BASELINE_SNAPSHOT_KEEP?: string;
+  // pending baseline 变更回执注入上限（沿用旧 memory changelog 回执数值）。
+  MEMORY_CHANGELOG_MAX_INJECT?: string;
+  MEMORY_CHANGELOG_MAX_CHARS?: string;
   // true = 丢弃没有有效 D1 记录背书的 Vectorize 命中 (清理 legacy 孤儿向量)，默认 false 保持现状。
   RECALL_REQUIRE_D1_BACKING?: string;
   // #35 周块附带：命中记忆所在那一周的 weekly_log 整块随召回下发。默认开，"false" 关。
@@ -93,6 +112,10 @@ export interface Env {
   GITHUB_DAILY_TOKEN?: string;
   EMPTY_MEMORY_MIN_CHARS?: string;
   MESSAGES_RETENTION_DAYS?: string;
+  // 是否允许后台任务物理删除终态记忆（默认 false 锁死，只报候选不执行）
+  MEMORY_AUTO_DELETE?: string;
+  /** P8 两阶段发布维护闸（wrangler.toml [vars]，一次性迁移窗口用）：true 时 fetch 写路径全 503、cron 跳过、queue 不消费 */
+  MAINTENANCE_MODE?: string;
   ENABLE_MEMORY_FILTER?: string;
   ENABLE_MEMORY_RERANKER?: string;
   MEMORY_RERANKER_MODEL?: string;
@@ -110,6 +133,10 @@ export interface Env {
   MEMORY_MIN_SCORE?: string;
   MEMORY_LEGACY_VECTOR_FALLBACK_LIMIT?: string;
   MEMORY_LEGACY_VECTOR_FALLBACK_SCORE_FACTOR?: string;
+  // P5-E · CORS 跨域白名单（传输层，行为模板 = 旧分支 77e25c0）：逗号分隔的精确
+  // Origin 列表，例如 "https://memoria.pages.dev,https://memoria.example.com"。
+  // 不配 = 保持现状（不返回任何 CORS 头，浏览器跨域请求全被拦）。
+  CORS_ALLOW_ORIGINS?: string;
 }
 
 export interface RetentionQueueMessage {
@@ -222,6 +249,12 @@ export interface MemoryRecord {
   summary: string | null;
   importance: number;
   confidence: number;
+  // 四维权重列（0018，旧分支 0010 同构）。写入时经 computeWeight 计算；
+  // 存量迁移行原样保留不重算（P0 全局规则 1/2）。
+  emotional: number;
+  recurrence: number;
+  unresolved: number;
+  weight: number;
   status: "active" | "deleted" | "superseded" | "low_confidence" | string;
   pinned: number;
   tags: string | null;
@@ -266,6 +299,12 @@ export interface MemoryApiRecord {
   summary: string | null;
   importance: number;
   confidence: number;
+  // 四维权重（0018，P3 恢复 API 可见性；旧分支 MemoryApiRecord 同位必填）。
+  // D1 本体为唯一真源；纯 Vectorize metadata 构造的记录按旧版硬编码 0。
+  emotional: number;
+  recurrence: number;
+  unresolved: number;
+  weight: number;
   status: string;
   pinned: boolean;
   tags: string[];

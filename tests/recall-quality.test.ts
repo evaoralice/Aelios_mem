@@ -81,10 +81,25 @@ test("surface is markdown, not a JSON blob", () => {
     { kind: "project", content: "你正在做记忆网关" }
   ]);
   assert.match(text, /\[Aelios 记忆/);
-  assert.match(text, /- 喜欢 Cloudflare/);
-  assert.match(text, /- 你正在做记忆网关/);
-  assert.doesNotMatch(text, /\[(?:precious|project)\]/);
+  assert.match(text, /- \[precious\] 喜欢 Cloudflare/);
+  assert.match(text, /- \[project\] 你正在做记忆网关/);
   assert.doesNotMatch(text, /\[\{"kind"/);
+});
+
+test("recall surface restores kind and recorded-date anchors without changing the body", () => {
+  const content = "原有正文：保留标点、换行\n第二行。";
+  const surface = assembleRecallSurface([
+    { kind: "note", content, recordedDate: "2026-09-07T12:34:56.000Z" }
+  ]);
+  assert.equal(surface.entries[0].content, content);
+  assert.match(surface.text, /- \[note\]\[2026-09-07\] 原有正文：保留标点、换行\n第二行。/);
+});
+
+test("missing date or type degrades minimally instead of inventing anchors", () => {
+  const noDate = assembleRecallSurface([{ kind: "precious", content: "没有日期的记忆" }]);
+  assert.match(noDate.text, /- \[precious\] 没有日期的记忆/);
+  assert.doesNotMatch(noDate.text, /\[\]/);
+  assert.equal(formatRecallSurface([{ kind: "  ", content: "没有类型的记忆" }]), "");
 });
 
 test("transport envelopes are removed without eating ordinary prose", () => {
@@ -171,8 +186,8 @@ test("automatic surfaces hide ids and message envelopes", () => {
   ]);
   assert.equal(surface.entries[0].id, "msg_7812076508172213971");
   assert.deepEqual(surface.entries[0].sourceIds, ["msg_1", "msg_2"]);
-  assert.match(surface.text, /- 迁企微、宁皎搬好了/);
-  assert.doesNotMatch(surface.text, /9fc3ec3b|7812076508172213971|msg_1|\[quote\]/);
+  assert.match(surface.text, /- \[quote\] 迁企微、宁皎搬好了/);
+  assert.doesNotMatch(surface.text, /9fc3ec3b|7812076508172213971|msg_1/);
 });
 
 test("quotes already covered by a memory are dropped", () => {

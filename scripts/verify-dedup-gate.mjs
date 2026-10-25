@@ -140,6 +140,10 @@ function defaultMemory(overrides) {
     summary: overrides.summary ?? null,
     importance: overrides.importance ?? 0.6,
     confidence: overrides.confidence ?? 0.8,
+    emotional: overrides.emotional ?? 0,
+    recurrence: overrides.recurrence ?? 0,
+    unresolved: overrides.unresolved ?? 0,
+    weight: overrides.weight ?? 0,
     status: overrides.status ?? "active",
     pinned: overrides.pinned ?? 0,
     tags: overrides.tags ?? "[]",
@@ -207,6 +211,10 @@ function createMockD1() {
             type,
             importance,
             confidence,
+            emotional,
+            recurrence,
+            unresolved,
+            weight,
             tags,
             source,
             sourceMessageIds,
@@ -214,12 +222,16 @@ function createMockD1() {
             factKey,
             id
           ] = binds;
-          const row = getById(id);
+          const row = getById(binds[binds.length - 1]);
           if (row) {
             row.content = content;
             row.type = type;
             row.importance = importance;
             row.confidence = confidence;
+            row.emotional = emotional;
+            row.recurrence = recurrence;
+            row.unresolved = unresolved;
+            row.weight = weight;
             row.tags = tags;
             row.source = source;
             row.source_message_ids = sourceMessageIds;
@@ -227,7 +239,7 @@ function createMockD1() {
             row.fact_key = factKey;
             row.version_status = row.version_status ?? "current";
           }
-          const lc = state.lifecycle.get(id) ?? { memory_id: id, namespace: row?.namespace ?? "default", seen_count: 0 };
+          const lc = state.lifecycle.get(binds[binds.length - 1]) ?? { memory_id: binds[binds.length - 1], namespace: row?.namespace ?? "default", seen_count: 0 };
           lc.fact_key = factKey;
           lc.valid_as_of = binds[binds.length - 4] ?? null;
           lc.last_seen_at = updatedAt;
@@ -295,6 +307,10 @@ function createMockD1() {
               content,
               importance,
               confidence,
+              emotional,
+              recurrence,
+              unresolved,
+              weight,
               tags,
               source,
               sourceMessageIds,
@@ -312,6 +328,10 @@ function createMockD1() {
                 content,
                 importance,
                 confidence,
+                emotional,
+                recurrence,
+                unresolved,
+                weight,
                 tags,
                 source,
                 source_message_ids: sourceMessageIds,
@@ -332,6 +352,10 @@ function createMockD1() {
             summary,
             importance,
             confidence,
+            emotional,
+            recurrence,
+            unresolved,
+            weight,
             status,
             pinned,
             tags,
@@ -352,6 +376,10 @@ function createMockD1() {
               summary,
               importance,
               confidence,
+              emotional,
+              recurrence,
+              unresolved,
+              weight,
               status,
               pinned,
               tags,
@@ -422,7 +450,7 @@ function createMockD1() {
           const lc = state.lifecycle.get(memoryId);
           return lc ? { fact_key: lc.fact_key ?? null } : null;
         }
-        if (normalized.includes("SELECT id, status, vector_id, fact_key, type, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?")) {
+        if (normalized.includes("SELECT id, status, vector_id, fact_key, type, importance, emotional, recurrence, unresolved, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?")) {
           const [namespace, id] = binds;
           const row = getById(id);
           if (!row || row.namespace !== namespace) return null;
@@ -432,15 +460,27 @@ function createMockD1() {
             vector_id: row.vector_id,
             fact_key: row.fact_key,
             type: row.type,
+            importance: row.importance ?? 0.6,
+            emotional: row.emotional ?? 0,
+            recurrence: row.recurrence ?? 0,
+            unresolved: row.unresolved ?? 0,
             authored_by: row.authored_by ?? null,
             response_tendency: row.response_tendency ?? null
           };
         }
-        if (normalized.includes("SELECT m.id, m.authored_by, m.response_tendency FROM memories m")) {
+        if (normalized.includes("SELECT m.id, m.importance, m.emotional, m.recurrence, m.unresolved, m.authored_by, m.response_tendency FROM memories m")) {
           const [namespace, factKey] = binds;
           const row = findActiveByFactKey(namespace, factKey);
           return row
-            ? { id: row.id, authored_by: row.authored_by ?? null, response_tendency: row.response_tendency ?? null }
+            ? {
+                id: row.id,
+                importance: row.importance ?? 0.6,
+                emotional: row.emotional ?? 0,
+                recurrence: row.recurrence ?? 0,
+                unresolved: row.unresolved ?? 0,
+                authored_by: row.authored_by ?? null,
+                response_tendency: row.response_tendency ?? null
+              }
             : null;
         }
         if (normalized.includes("FROM monthly_log") && normalized.includes("month = ?")) {

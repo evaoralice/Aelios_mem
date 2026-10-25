@@ -1,12 +1,29 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ensureD1Migrations, resolveMaintenanceMode } from "./p8-deploy.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const wranglerTomlPath = resolve(root, "wrangler.toml");
 function readTomlBlock(block) {
   const match = wranglerToml.match(new RegExp(`\\[\\[${block}\\]\\]([\\s\\S]*?)(?=\\n\\[|$)`));
   return (name) => match?.[1]?.match(new RegExp(`${name}\\s*=\\s*"([^"]+)"`))?.[1];
+}
+// 单节（如 [vars]）里的键值读取；MAINTENANCE_MODE 是 P8 两阶段发布的维护闸。
+function readTomlSectionVar(section, name) {
+  const lines = wranglerToml.split("\n");
+  let inSection = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      inSection = trimmed === `[${section}]`;
+      continue;
+    }
+    if (!inSection) continue;
+    const match = trimmed.match(new RegExp(`^${name}\\s*=\\s*"([^"]*)"`));
+    if (match) return match[1];
+  }
+  return null;
 }
 const wranglerToml = readFileSync(wranglerTomlPath, "utf8");
 const dbName = process.env.CMP_D1_NAME || readTomlBlock("d1_databases")("database_name") || "companion_memory_proxy";
@@ -163,8 +180,18 @@ function ensureD1() {
   upsertD1Binding(databaseId);
   console.log(`D1 binding ready: ${dbBinding} -> ${dbName}`);
 
-  console.log("Applying D1 migrations");
-  run(["d1", "migrations", "apply", dbName, "--remote"]);
+  // P8 部署链（plan 工作包 P8）：识别远端谱系（fresh / 旧 feat/memory-dimensions
+  // 待升级 / 已完成 P8 / 全新谱系 / 未知拒绝），旧库自动执行账本引导 +
+  // 普通迁移剩余 + migrations-p8/0021–0025 + P8 post-verify。MAINTENANCE_MODE
+  // = "true"（两阶段发布的 stage 1 冻结推送）时跳过全部 D1 变更，只部署维护态
+  // Worker。该键必须在 [vars] 显式常驻且只接受 "true"/"false"——deploy 用
+  // --keep-vars，从 toml 删行不会清除远端旧值（会把服务永久锁在 503），
+  // 缺键/拼错直接构建失败（resolveMaintenanceMode）。
+  // 任一步失败：本脚本抛错 → `npm run deploy` 的 && 短路 → 不部署 Worker。
+  // 备份不由脚本处理：上线前置条件是用户已自行 wrangler d1 export 并确认恢复点。
+  const maintenance = resolveMaintenanceMode(readTomlSectionVar("vars", "MAINTENANCE_MODE"));
+  const result = ensureD1Migrations({ run, dbName, root, maintenance });
+  console.log(`D1 migrations phase done: ${result.outcome}（状态 ${result.state}）`);
 }
 
 function ensureVectorize() {

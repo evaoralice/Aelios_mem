@@ -69,7 +69,7 @@ assert.match(source, /function\s+isLifecycleEnabled\(env: Env\): boolean \{\s*re
 assert.match(source, /INSERT INTO memories \(/);
 assert.match(source, /INSERT OR IGNORE INTO memory_lifecycle \(/);
 assert.match(source, /await env\.DB\.batch\(\[memoryInsert, lifecycleInsert\]\);/);
-assert.match(source, /UPDATE memories SET\s+type = \?, content = \?, summary = \?, importance = \?, confidence = \?, status = \?,/s);
+assert.match(source, /UPDATE memories SET\s+type = \?, content = \?, summary = \?, importance = \?, confidence = \?,\s+emotional = \?, recurrence = \?, unresolved = \?, weight = \?, status = \?,/s);
 assert.match(source, /UPDATE memories SET status = 'deleted', updated_at = \? WHERE namespace = \? AND id = \?/);
 
 const d1Insert = indexOfOrThrow(createBody, "await insertMemoryRecord(env, record);");
@@ -78,7 +78,14 @@ assert.ok(d1Insert < vectorUpsert, "createVectorMemory must write D1 before Vect
 
 assert.match(createBody, /catch \(error\) \{\s*console\.error\("memory vector upsert failed after D1 insert", \{ id, error \}\);\s*\}/s);
 assert.match(createBody, /return memoryRecordToApiRecord\(record\);/);
-assert.match(getBody, /const d1Record = await getMemoryRecordById\(env, id\);\s*return d1Record \? memoryRecordToApiRecord\(d1Record\) : null;/s);
+// P3 读取顺序：D1 必须先于 Vectorize metadata——有 D1 本体就返回 D1 完整记录（四维不进 metadata）。
+const d1Get = indexOfOrThrow(getBody, "const d1Record = await getMemoryRecordById(env, id);");
+const vectorGet = indexOfOrThrow(getBody, "await requireVectorize(env).getByIds");
+assert.ok(d1Get < vectorGet, "getVectorMemory must read D1 before Vectorize metadata (D1 is the sole truth for dimensions)");
+assert.match(getBody, /if \(d1Record\) return memoryRecordToApiRecord\(d1Record\);/);
+assert.match(getBody, /if \(options\?\.requireD1Backing\) return null;/);
+// 孤儿降级保留：metadata 记录只在 D1 查不到时返回；ref_id 对得上 D1 时仍以 D1 为准。
+assert.match(getBody, /const backing = await getMemoryRecordById\(env, record\.id\);\s*if \(backing\) return memoryRecordToApiRecord\(backing\);\s*return record;/s);
 
 const d1Delete = indexOfOrThrow(deleteBody, "await markMemoryRecordDeleted(env,");
 const vectorDelete = indexOfOrThrow(deleteBody, "await requireVectorize(env).deleteByIds");
@@ -143,7 +150,12 @@ assert.match(dreamExtractSource, /export function buildDreamExtractPrompt/);
 assert.match(dreamExtractSource, /export async function extractDreamMemoriesFromMessages/);
 assert.match(digestSource, /source: "dream_extract"/);
 assert.match(digestSource, /buildDreamRoutingPlan/);
-assert.match(mcpSource, /name: "diary_get"/);
+// 方案 A（plan 阶段 2）：对模型暴露 daily_log_read/write，上游 diary_get 从工具列表隐藏（callTool 仍兼容直调）。
+assert.match(mcpSource, /name: "daily_log_read"/);
+assert.match(mcpSource, /name: "daily_log_write"/);
+assert.match(mcpSource, /params\.name === "daily_log_read" \|\| params\.name === "diary_get"/);
+assert.doesNotMatch(mcpSource, /name: "diary_get"/);
+assert.match(mcpSource, /name: "baseline_change"/);
 assert.match(mcpSource, /is deprecated in v3; digest lives in the client system prompt/);
 assert.match(dbV2Source, /await db\.batch\(\[ensureLifecycle, markSeen\]\);/);
 assert.match(dbV2Source, /export async function fetchLongtailByIds/);

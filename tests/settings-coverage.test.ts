@@ -35,7 +35,8 @@ const INTERNAL: Record<string, string> = {
   DAILY_DIGEST_MAX_TOKENS: 'readDreamMaxTokens 的旧名兜底',
   DAILY_DIGEST_MEMORY_CONTEXT_LIMIT: 'readDreamMemoryContextLimit 的旧名兜底',
   DAILY_DIGEST_MAX_RUNS: 'DREAM_MAX_RUNS 的旧名兜底',
-  ENABLE_DAILY_MEMORY_DIGEST: 'isDreamEnabled 的旧名兜底，ENABLE_DREAM 优先'
+  ENABLE_DAILY_MEMORY_DIGEST: 'isDreamEnabled 的旧名兜底，ENABLE_DREAM 优先',
+  MAINTENANCE_MODE: 'P8 两阶段发布的一次性维护闸：只在 wrangler.toml [vars] 出现（stage 1 冻结推送），迁移窗口内拒绝写入；部署时变量，不上面板、不可被 /admin 覆盖'
 };
 
 function sourceFiles(dir: string): string[] {

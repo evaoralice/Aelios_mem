@@ -13,7 +13,11 @@
 //             metadata.namespace === input.namespace 过滤后进分类。
 // 不发明新的枚举方式，避免两处实现漂移。
 //
-// 分类三类 (以 metadata.ref_id 去查 D1)：
+// 分类三类 (以 metadata.ref_id 去查 D1；memories/longtail 的 id 是全局主键，
+// 存在性判断不按 namespace 过滤——P8 迁移后向量 metadata.namespace 可能还停在
+// 旧值，而 D1 行已迁到新 namespace；按 namespace 过滤会把这类漂移向量误判成
+// orphan，cleanup 时删掉本该由 vectorBackfill 修复的活向量。漂移修复归 backfill，
+// 这里只回答"D1 里还有没有这条本体")：
 //   backed_active   —— D1 记录存在，memories.status = 'active'（或 longtail 记录存在，
 //                       longtail 没有 status 概念，存在即算 active）。
 //   backed_inactive —— D1 记录存在，但 status 不是 active（superseded/archived/deleted/...）。
@@ -34,11 +38,12 @@ const D1_LOOKUP_BATCH = 90;
 
 export type VectorDoctorClass = "backed_active" | "backed_inactive" | "orphan";
 
+// 样本只带定位字段（vector_id / ref_id / type），不带 content 预览——
+// doctor 在 P9 runbook 里跑，报告会经工具输出回显，正文不外发。
 export interface VectorDoctorSample {
   vector_id: string;
   ref_id: string | null;
   type: string;
-  content_preview: string;
 }
 
 export interface VectorDoctorCleanupFailure {
@@ -89,15 +94,6 @@ function readMetaString(metadata: Record<string, unknown>, field: string): strin
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function readMetaContentPreview(metadata: Record<string, unknown>): string {
-  const fields = ["content", "text", "memory", "summary", "document", "chunk", "value", "title"];
-  for (const field of fields) {
-    const value = metadata[field];
-    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
-  }
-  return "";
-}
-
 // Same fallback the rest of the codebase uses when metadata.ref_id is absent
 // (v1-era vectors that predate the ref_id field): strip the "mem_" vector-id
 // prefix to recover the D1 memory id. See vectorMetadataToMemoryRecord in
@@ -116,7 +112,6 @@ interface EnumeratedVector {
   kind: "memory" | "longtail";
   refId: string | null;
   type: string;
-  contentPreview: string;
 }
 
 async function enumerateNamespaceVectors(
@@ -170,8 +165,7 @@ async function enumerateNamespaceVectors(
           namespace: metaNamespace ?? input.namespace,
           kind,
           refId: deriveRefId(v.id, metadata),
-          type: readMetaString(metadata, "type") || (kind === "longtail" ? "longtail" : "note"),
-          contentPreview: readMetaContentPreview(metadata)
+          type: readMetaString(metadata, "type") || (kind === "longtail" ? "longtail" : "note")
         });
       }
     } catch (err) {
@@ -184,11 +178,7 @@ async function enumerateNamespaceVectors(
   return { vectors, errors };
 }
 
-async function lookupMemoryStatuses(
-  db: D1Database,
-  namespace: string,
-  ids: string[]
-): Promise<Map<string, string>> {
+async function lookupMemoryStatuses(db: D1Database, ids: string[]): Promise<Map<string, string>> {
   const unique = [...new Set(ids.filter(Boolean))];
   const statusById = new Map<string, string>();
 
@@ -196,8 +186,8 @@ async function lookupMemoryStatuses(
     const batch = unique.slice(i, i + D1_LOOKUP_BATCH);
     const placeholders = batch.map(() => "?").join(", ");
     const result = await db
-      .prepare(`SELECT id, status FROM memories WHERE namespace = ? AND id IN (${placeholders})`)
-      .bind(namespace, ...batch)
+      .prepare(`SELECT id, status FROM memories WHERE id IN (${placeholders})`)
+      .bind(...batch)
       .all<{ id: string; status: string }>();
     for (const row of result.results ?? []) {
       statusById.set(row.id, row.status);
@@ -207,11 +197,7 @@ async function lookupMemoryStatuses(
   return statusById;
 }
 
-async function lookupLongtailExistence(
-  db: D1Database,
-  namespace: string,
-  ids: string[]
-): Promise<Set<string>> {
+async function lookupLongtailExistence(db: D1Database, ids: string[]): Promise<Set<string>> {
   const unique = [...new Set(ids.filter(Boolean))];
   const existing = new Set<string>();
 
@@ -219,8 +205,8 @@ async function lookupLongtailExistence(
     const batch = unique.slice(i, i + D1_LOOKUP_BATCH);
     const placeholders = batch.map(() => "?").join(", ");
     const result = await db
-      .prepare(`SELECT id FROM longtail WHERE namespace = ? AND id IN (${placeholders})`)
-      .bind(namespace, ...batch)
+      .prepare(`SELECT id FROM longtail WHERE id IN (${placeholders})`)
+      .bind(...batch)
       .all<{ id: string }>();
     for (const row of result.results ?? []) {
       existing.add(row.id);
@@ -264,8 +250,8 @@ export async function runVectorDoctor(env: Env, input: VectorDoctorInput): Promi
   const longtailRefIds = vectors.filter((v) => v.kind === "longtail" && v.refId).map((v) => v.refId as string);
 
   const [statusById, longtailExisting] = await Promise.all([
-    lookupMemoryStatuses(env.DB, namespace, memoryRefIds),
-    lookupLongtailExistence(env.DB, namespace, longtailRefIds)
+    lookupMemoryStatuses(env.DB, memoryRefIds),
+    lookupLongtailExistence(env.DB, longtailRefIds)
   ]);
 
   const counts: Record<VectorDoctorClass, number> = { backed_active: 0, backed_inactive: 0, orphan: 0 };
@@ -292,8 +278,7 @@ export async function runVectorDoctor(env: Env, input: VectorDoctorInput): Promi
       samples[cls].push({
         vector_id: vector.vectorId,
         ref_id: vector.refId,
-        type: vector.type,
-        content_preview: vector.contentPreview
+        type: vector.type
       });
     }
     if (cls !== "backed_active") cleanupTargets.push(vector.vectorId);

@@ -9,3 +9,9 @@ dist/
 # build-process analysis files
 .analysis-cache.md
 .analysis-archive/
+
+# local versioned backups (AGENTS.md Backup Before Edit) — never commit
+.backups/
+
+# P7 migration rehearsal workspace — masked copies/reports stay local-only sensitive
+.migration-work/

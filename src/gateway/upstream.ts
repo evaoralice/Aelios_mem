@@ -133,7 +133,7 @@ export function prepareGatewayRequest(env: Env, config: GatewayConfig, identity:
   const normalized = normalizeRequest(body, protocol);
   const out = normalized.body;
   out.model = route.model;
-  if (isMainModel(identity, body.model)) applyThinkingPolicy(out, identity, protocol, headers);
+  if (isMainModel(identity, body.model)) applyThinkingPolicy(out, identity, protocol, headers, env);
   validateRequest(out, protocol, headers);
   sanitizeCacheControl(out, protocol);
   validateRequest(out, protocol, headers);

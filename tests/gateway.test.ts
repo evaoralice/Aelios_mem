@@ -945,6 +945,7 @@ test("reranked recall is wired across sources and stays out of conversation stor
   assert.equal(result.response.headers.get("x-aelios-memory"),"injected");
   const prompt=calls.at(-1).query.messages[0].content;
   assert.match(prompt,/热豆浆/);assert.doesNotMatch(prompt,/永远|秘密|event_key/);
+  assert.match(prompt,/- \[authored\]\[\d{4}-\d{2}-\d{2}\] [^\n]*热豆浆/);
   assert.equal((prompt.match(/^- /gm)||[]).length,1);
   const history=await run("/api/gateway/recalls?identity=partner");
   const records=JSON.parse(history.text).items;

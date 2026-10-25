@@ -1,5 +1,7 @@
 import { object, type Identity, type Protocol } from "./config";
 import { cleanMessageText } from "../utils/sanitize";
+import { applyThinkingPlan, planThinkingPolicy } from "../extensions/adaptiveThinking";
+import type { Env } from "../types";
 
 /**
  * Client request bodies are arbitrary JSON that this layer reads and rewrites field by field.
@@ -128,8 +130,13 @@ export function hasServerState(body: Body, protocol: Protocol): boolean {
   return protocol === "responses" && !!(body.previous_response_id || body.conversation ||
     inputItems(body, protocol).some(item => item.type === "item_reference"));
 }
-export function applyThinkingPolicy(body: Body, identity: Identity, protocol: Protocol, headers: Headers): void {
-  if (protocol !== "messages" || identity.anthropicThinking !== "drop_block" || body.thinking?.type === "disabled") return;
+// P6（thinking 策略接缝）：adaptive/manual 决策在 extensions/adaptiveThinking，本函数仍是
+// 唯一入口（prepareGatewayRequest 对主模型调用一次）。策略先执行，identity 的 drop_block
+// 绑定标记随后叠加到（可能被注入的）thinking 上；不配任何 ANTHROPIC_THINKING_* 时逐字节不改动请求。
+export function applyThinkingPolicy(body: Body, identity: Identity, protocol: Protocol, headers: Headers, env?: Env): void {
+  if (protocol !== "messages") return;
+  if (env !== undefined) applyThinkingPlan(body, planThinkingPolicy(env, body));
+  if (identity.anthropicThinking !== "drop_block" || body.thinking?.type === "disabled") return;
   // Invalid client values must reach validation, not be coerced into adaptive.
   if (body.thinking !== undefined && (!object(body.thinking) || !["enabled", "adaptive"].includes(body.thinking.type))) return;
   body.thinking = { type: "adaptive", ...body.thinking,

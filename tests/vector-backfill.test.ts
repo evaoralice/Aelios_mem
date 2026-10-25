@@ -192,7 +192,10 @@ test("metadata written by older paths is not flagged stale for formatting differ
   const memory = insertMemory({ tags: "[\"a\", \"b\"]" });
   vectors.set(`mem_${memory.id}`, {
     id: `mem_${memory.id}`, values: [0.1],
-    metadata: { ref_id: memory.id, content: memory.content, type: memory.type, tags: "[\"a\",\"b\"]" }
+    metadata: {
+      namespace: "default", status: "active",
+      ref_id: memory.id, content: memory.content, type: memory.type, tags: "[\"a\",\"b\"]"
+    }
   });
 
   const report = await runVectorBackfill(env, { namespace: "default" });

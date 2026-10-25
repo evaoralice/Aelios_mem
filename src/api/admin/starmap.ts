@@ -9,6 +9,7 @@ export const STARMAP_HTML = String.raw`<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>记忆星图 · 两江交汇 — Aelios</title>
 <style>
   :root {

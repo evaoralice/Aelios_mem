@@ -88,7 +88,9 @@ export async function deleteOldIdempotencyKeys(
 
 // ---------------------------------------------------------------------------
 // memories: mark expired — active, non-pinned, non-identity/persona memories
-//           whose updated_at is older than cutoff become status=expired.
+//           whose updated_at AND last_recalled_at are both older than cutoff
+//           become status=expired. A memory that keeps being recalled is in
+//           active use and must not expire just because nobody edited it.
 //           Returns the id/vector_id of newly expired records so caller
 //           can sync Vectorize deletion.
 // ---------------------------------------------------------------------------
@@ -114,9 +116,10 @@ export async function expireOldMemories(
          AND status = 'active'
          AND pinned = 0
          AND type NOT IN ('identity', 'persona')
-         AND updated_at < ?`
+         AND updated_at < ?
+         AND (last_recalled_at IS NULL OR last_recalled_at < ?)`
     )
-    .bind(namespace, cutoff)
+    .bind(namespace, cutoff, cutoff)
     .all<ExpiredMemoryRef>();
 
   const expired = toExpire.results ?? [];
@@ -131,9 +134,10 @@ export async function expireOldMemories(
          AND status = 'active'
          AND pinned = 0
          AND type NOT IN ('identity', 'persona')
-         AND updated_at < ?`
+         AND updated_at < ?
+         AND (last_recalled_at IS NULL OR last_recalled_at < ?)`
     )
-    .bind(now, namespace, cutoff)
+    .bind(now, namespace, cutoff, cutoff)
     .run();
 
   return { count: expired.length, expired };
@@ -169,6 +173,8 @@ export async function listHardDeletableMemories(
 
 // ---------------------------------------------------------------------------
 // memories: hard delete by ids (single batch).
+//           Also removes memory_lifecycle sidecar rows (mirrors deleteMemoryV2)
+//           so hard delete doesn't leave orphan lifecycle rows growing forever.
 //           Caller is responsible for batching via hardDeleteMemoriesBatched.
 // ---------------------------------------------------------------------------
 
@@ -187,13 +193,15 @@ async function hardDeleteMemoriesBatch(
   } catch (error) {
     console.error("retention: memory fts hard-delete cleanup failed", error);
   }
-  const result = await db
-    .prepare(
-      `DELETE FROM memories WHERE namespace = ? AND id IN (${placeholders})`
-    )
-    .bind(namespace, ...ids)
-    .run();
-  return result.meta.changes ?? 0;
+  const [memoriesResult] = await db.batch([
+    db
+      .prepare(`DELETE FROM memories WHERE namespace = ? AND id IN (${placeholders})`)
+      .bind(namespace, ...ids),
+    db
+      .prepare(`DELETE FROM memory_lifecycle WHERE namespace = ? AND memory_id IN (${placeholders})`)
+      .bind(namespace, ...ids)
+  ]);
+  return memoriesResult.meta.changes ?? 0;
 }
 
 // ---------------------------------------------------------------------------

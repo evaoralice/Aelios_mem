@@ -47,7 +47,7 @@ function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 const text = (v: unknown): v is string => typeof v === "string" && !!v.trim();
-const KEY_NAMES = ["CHATBOX_API_KEY", "IM_API_KEY", "DEBUG_API_KEY", "GUIDE_DOG_API_KEY"];
+const KEY_NAMES = ["CHATBOX_API_KEY", "IM_API_KEY", "DEBUG_API_KEY", "MEMORY_MCP_API_KEY", "GUIDE_DOG_API_KEY"];
 // Slugs are the first path segment, so they cannot shadow existing entry points.
 const RESERVED_SLUGS = ["v1", "api", "admin", "health", "mcp", "memory-mcp", "memory-admin", "guide-dog"];
 

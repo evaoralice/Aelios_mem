@@ -3,6 +3,8 @@ import { parseStringArray } from "../../utils/parse";
 
 // =====================================================================
 // 昨天日志 daily_log (dream 每天写一条，boot 读"昨天")
+// 也可由模型通过 MCP daily_log_write 主动写入，含 affect_chord（当日情绪和弦，
+// 可空；P4 恢复，chord 规则见 src/extensions/affectChord.ts，本层只存/返回）。
 // =====================================================================
 
 export interface DailyLogRow {
@@ -10,6 +12,7 @@ export interface DailyLogRow {
   date: string;
   title: string;
   summary: string;
+  affect_chord: string | null;
   source_message_ids: string[];
   updated_at: string;
 }
@@ -23,6 +26,7 @@ type DailyLogDbRow = {
   date: string;
   title: string;
   summary: string;
+  affect_chord?: string | null;
   source_message_ids?: string | null;
   updated_at: string;
 };
@@ -33,6 +37,7 @@ function mapDailyLog(row: DailyLogDbRow): DailyLogRow {
     date: row.date,
     title: row.title,
     summary: row.summary,
+    affect_chord: row.affect_chord ?? null,
     source_message_ids: readSourceMessageIds(row.source_message_ids),
     updated_at: row.updated_at
   };
@@ -43,7 +48,7 @@ export async function getDailyLog(
   input: { namespace: string; date: string }
 ): Promise<DailyLogRow | null> {
   const row = await db
-    .prepare("SELECT namespace, date, title, summary, source_message_ids, updated_at FROM daily_log WHERE namespace = ? AND date = ?")
+    .prepare("SELECT namespace, date, title, summary, affect_chord, source_message_ids, updated_at FROM daily_log WHERE namespace = ? AND date = ?")
     .bind(input.namespace, input.date)
     .first<DailyLogDbRow>();
   return row ? mapDailyLog(row) : null;
@@ -51,27 +56,31 @@ export async function getDailyLog(
 
 export async function upsertDailyLog(
   db: D1Database,
-  input: { namespace: string; date: string; title: string; summary: string; sourceMessageIds?: string[] }
+  input: { namespace: string; date: string; title: string; summary: string; affectChord?: string | null; sourceMessageIds?: string[] }
 ): Promise<DailyLogRow> {
   const now = nowIso();
   const sourceMessageIds = [...new Set((input.sourceMessageIds ?? []).filter(Boolean))];
   const encoded = JSON.stringify(sourceMessageIds);
+  // affect_chord COALESCE 保留语义（旧分支 db/v2.ts:1079 同款）：新值替换、
+  // 省略（null）保留旧值——Dream 改写当天 summary 不会顺手抹掉模型写的 chord。
   await db
     .prepare(
-      `INSERT INTO daily_log (namespace, date, title, summary, source_message_ids, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO daily_log (namespace, date, title, summary, affect_chord, source_message_ids, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(namespace, date) DO UPDATE SET
          title = excluded.title,
          summary = excluded.summary,
+         affect_chord = COALESCE(excluded.affect_chord, daily_log.affect_chord),
          source_message_ids = excluded.source_message_ids,
          updated_at = excluded.updated_at`
     )
-    .bind(input.namespace, input.date, input.title, input.summary, encoded, now)
+    .bind(input.namespace, input.date, input.title, input.summary, input.affectChord ?? null, encoded, now)
     .run();
   return {
     namespace: input.namespace,
     date: input.date,
     title: input.title,
     summary: input.summary,
+    affect_chord: input.affectChord ?? null,
     source_message_ids: sourceMessageIds,
     updated_at: now
   };
@@ -83,7 +92,7 @@ export async function listDailyLogsInRange(
 ): Promise<DailyLogRow[]> {
   const result = await db
     .prepare(
-      `SELECT namespace, date, title, summary, source_message_ids, updated_at
+      `SELECT namespace, date, title, summary, affect_chord, source_message_ids, updated_at
        FROM daily_log
        WHERE namespace = ?
          AND date >= ?
@@ -99,10 +108,11 @@ export async function listRecentDailyLogs(
   db: D1Database,
   input: { namespace: string; limit: number }
 ): Promise<DailyLogRow[]> {
-  const limit = Math.min(Math.max(Math.floor(input.limit), 1), 100);
+  // 365 与 daily_log_read 工具声明的 limit 上限一致（工具向前翻页靠它，MCP 侧校验 1–365）。
+  const limit = Math.min(Math.max(Math.floor(input.limit), 1), 365);
   const result = await db
     .prepare(
-      `SELECT namespace, date, title, summary, source_message_ids, updated_at
+      `SELECT namespace, date, title, summary, affect_chord, source_message_ids, updated_at
        FROM daily_log
        WHERE namespace = ?
        ORDER BY date DESC

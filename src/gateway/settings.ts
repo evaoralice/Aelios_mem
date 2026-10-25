@@ -15,6 +15,7 @@ export const SETTINGS: SettingSpec[] = [
   { group: "记忆召回", name: "MEMORY_FILTER_MIN_SCORE", label: "重排前相似度下限" },
   { group: "记忆召回", name: "MEMORY_INJECT_DECAY_FACTOR", label: "刚注入过的记忆降权", hint: "降低近期注入记忆的候选排序；最终原文重排仍按相关性排序。填 1 关闭" },
   { group: "记忆召回", name: "MEMORY_AUTHORED_BOOST", label: "亲笔记忆加成", hint: "自己写的记忆排前面。填 1 关闭" },
+  { group: "记忆召回", name: "RECALL_ROLE_BOOST", label: "本空间记忆加成", hint: "跨空间可见时，当前写入空间的同等相关记忆排到其他空间前面。默认 1.3，填 1 关闭" },
   { group: "记忆召回", name: "RECALL_MIN_SCORE", label: "召回地板分", hint: "默认 0.15，打在降权前的原始相关性分上。调高会漏掉换了说法的记忆，调低会放进噪声；显式搜索可用 min_score 临时覆盖" },
   { group: "记忆召回", name: "RELATION_EXPANSION", label: "顺着关系边再扩一跳", hint: "默认 off。填 on 或 true 后，向量种子命中会沿关系边扩 hop1/hop2。关着时召回结果和没这个功能时逐字一致" },
   { group: "记忆召回", name: "TRIGGER_RECALL", label: "触发器联想召回", hint: "默认 off。填 on 或 true 后，问题先查触发器索引，命中的触发器把它挂的记忆并进候选池——专治问题和记忆语义相关但几乎不共享词汇的那一类。关着时召回结果和没这个功能时逐字一致" },
@@ -56,7 +57,16 @@ export const SETTINGS: SettingSpec[] = [
   { group: "Dream 与日记", name: "JUDGE_DISCARD_MAX", label: "代审自动丢弃阈值", hint: "默认 0.3。只管代审：评分不高于它自动丢弃，中间留人工。助手自己判时不看这个" },
   { group: "Dream 与日记", name: "EMPTY_MEMORY_MIN_CHARS", label: "空记忆最短字符数", hint: "默认 4。短于这个长度的抽取结果当空记忆丢掉" },
 
+  { group: "Baseline", name: "BASELINE_MAX_CHARS_PER_ROLE", label: "Baseline 目标长度（每空间）", hint: "合并 prompt 给模型的软长度目标，默认 2000。超限时 Dream 追加一次压缩请求，不做硬截断" },
+  { group: "Baseline", name: "BASELINE_MAX_CHARS_TOTAL", label: "Baseline 总长度提醒阈值", hint: "默认 8000。只是合并 prompt 的提醒值，不是硬限制" },
+  { group: "Baseline", name: "BASELINE_SNAPSHOT_KEEP", label: "Baseline 历史快照保留几版", hint: "默认 7。每次 Dream 合并成功后保存新版本快照，超出的旧快照自动清理" },
+  { group: "Baseline", name: "MEMORY_CHANGELOG_MAX_INJECT", label: "Pending 回执最多显示几条", hint: "默认 10。模型提交的待合并 baseline 变更会以回执形式注入，避免重复提交" },
+  { group: "Baseline", name: "MEMORY_CHANGELOG_MAX_CHARS", label: "Pending 回执字符上限", hint: "默认 1500。回执注入的总字符预算" },
+
   { group: "数据留存", name: "MESSAGES_RETENTION_DAYS", label: "原始对话保留天数", hint: "Dream 抽完记忆后，原文留几天" },
+  { group: "数据留存", name: "MEMORY_AUTO_DELETE", label: "允许物理删除终态记忆", hint: "默认关闭：软删/过期/被替换满 365 天的记忆只统计候选数，不物理删除。填 true 才真正执行；数据策略是到处软删，后台任务不许悄悄毁行" },
+
+  { group: "传输层", name: "CORS_ALLOW_ORIGINS", label: "浏览器跨域白名单", hint: "逗号分隔的精确 Origin 列表，例如 https://memoria.pages.dev。不配 = 不返回任何 CORS 头，浏览器跨域全拦。只做精确等值匹配，不吃通配符或前缀；实际域名随 P12 部署配置填" },
 
   { group: "模型与线路", name: "AI_GATEWAY_ID", label: "默认 AI Gateway ID", hint: "会写进上游 URL。自定义 Provider 和动态路由必须填对，不能只靠账户默认 Gateway" },
   { group: "模型与线路", name: "UPSTREAM_STRIP_TOOL_FIELDS", label: "始终剥离的工具字段", hint: "逗号分隔，例如 eager_input_streaming,cache_control。填上就每次先剥，不再等上游那次 400。留空则按线路学习：只在被拒一次后自动剥离（换 isolate 会重学一次），接受该字段的上游不受影响。工具的身份字段 name/description/input_schema/type 会被拒绝" },
@@ -64,6 +74,10 @@ export const SETTINGS: SettingSpec[] = [
   { group: "模型与线路", name: "CHAT_MODEL", label: "导盲犬入口的模型", hint: "只给 /v1/guide-dog 用，聊天走网关身份" },
   { group: "模型与线路", name: "PUBLIC_MODEL_NAME", label: "导盲犬对外显示的模型名" },
   { group: "模型与线路", name: "DEFAULT_UPSTREAM_MODEL", label: "上游模型兜底名", hint: "CHAT_MODEL 没填时用它" },
+  { group: "模型与线路", name: "ANTHROPIC_THINKING_MODE", label: "Anthropic thinking 模式", hint: "messages 协议主模型生效。auto=按模型自动选（Claude Opus/Sonnet 4.6+、Fable/Mythos 5+ 用 adaptive，其余 manual budget）；adaptive/manual=全局指定；off=关。都不填时完全透传客户端请求" },
+  { group: "模型与线路", name: "ANTHROPIC_THINKING_EFFORT", label: "Adaptive thinking 强度", hint: "low/medium/high/xhigh/max，默认 high。没有 budget→effort 换算：budget 只表达要思考，强度由本项或客户端 output_config.effort 决定" },
+  { group: "模型与线路", name: "ANTHROPIC_THINKING_BUDGET", label: "Manual thinking 预算", hint: "1024–32000，默认 1024。仅旧式 manual thinking（thinking.type=enabled）使用；Claude 4.7+ 会拒绝 manual" },
+  { group: "模型与线路", name: "ANTHROPIC_THINKING_ENABLED", label: "Thinking 旧开关", hint: "true = 主模型默认开 thinking（按模型自动选）。只在 ANTHROPIC_THINKING_MODE 没填时生效，迁移期兼容用" },
   { group: "模型与线路", name: "ALLOW_MODEL_PASSTHROUGH", label: "允许客户端指定模型", hint: "默认关闭，客户端传什么模型名都落到 CHAT_MODEL。填 true 后导盲犬入口按客户端给的模型名原样转发，等于放开模型选择" },
 
   { group: "GitHub 日档（可选）", name: "GITHUB_DAILY_REPO", label: "仓库", hint: "owner/repo；留空就是不启用" },

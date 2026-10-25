@@ -23,7 +23,10 @@
     "memory:deep-clean": "node scripts/deep-clean-memories.mjs",
     "cache:test": "node scripts/test-claude-cache.mjs",
     "db:migrate:local": "wrangler d1 migrations apply companion_memory_proxy --local",
-    "db:migrate:remote": "wrangler d1 migrations apply companion_memory_proxy --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply companion_memory_proxy --remote",
+    "migration:inspect": "node --import tsx scripts/migration-rehearsal.ts inspect",
+    "migration:rehearse": "node --import tsx scripts/migration-rehearsal.ts rehearse",
+    "migration:p8": "node --import tsx scripts/migration-p8.ts upgrade"
   },
   "cloudflare": {
     "bindings": {

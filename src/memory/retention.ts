@@ -25,7 +25,7 @@ const USAGE_LOGS_RETENTION_DAYS = 30;
 const MEMORY_EVENTS_RETENTION_DAYS = 30;
 const IDEMPOTENCY_KEYS_RETENTION_DAYS = 7;
 const MEMORY_ACTIVE_EXPIRY_DAYS = 180;
-const MEMORY_HARD_DELETE_DAYS = 30;
+const MEMORY_HARD_DELETE_DAYS = 365;
 const THROTTLE_HOURS = 24;
 
 // ---------------------------------------------------------------------------
@@ -121,9 +121,27 @@ export async function runMemoryRetention(
     }
   }
 
-  // 6. Hard delete terminal memories (deleted/superseded/expired > 30 days)
+  // 6. Hard delete terminal memories (deleted/superseded/expired > 365 days)
+  //
+  // Gated behind MEMORY_AUTO_DELETE (default OFF): data policy is soft-delete
+  // everywhere — externally soft-deleted memories must not be silently
+  // physically destroyed by a background job. When the gate is off we only
+  // report candidate counts so the operator can decide.
   const hardCutoff = daysAgo(MEMORY_HARD_DELETE_DAYS);
   const deletable = await listHardDeletableMemories(env.DB, namespace, hardCutoff);
+
+  if (env.MEMORY_AUTO_DELETE !== "true") {
+    stats.hardDeletedMemories = 0;
+    stats.hardDeleteCandidates = deletable.length;
+    if (deletable.length > 0) {
+      console.log("retention: hard delete skipped (MEMORY_AUTO_DELETE not enabled)", {
+        namespace,
+        candidates: deletable.length
+      });
+    }
+    await writeCursor(env.DB, cursorName, now);
+    return { ran: true, stats };
+  }
 
   if (deletable.length > 0) {
     const vectorIds = deletable

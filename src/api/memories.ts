@@ -277,7 +277,17 @@ async function handleRecallMemories(request: Request, env: Env, profile: KeyProf
     content: h.content,
     type: h.type,
     score: h.score,
-    importance: 0.5,
+    // P3：memory 命中透出 D1 真实四维与 weight（RecallHit 增量字段）；
+    // longtail 表无四维列，字段缺省不伪造占位值。
+    ...(h.importance !== undefined
+      ? {
+          importance: h.importance,
+          emotional: h.emotional,
+          recurrence: h.recurrence,
+          unresolved: h.unresolved,
+          weight: h.weight
+        }
+      : {}),
     source: h.source,
     source_layer: h.source_layer
   }));
@@ -290,8 +300,13 @@ async function handleRecallMemories(request: Request, env: Env, profile: KeyProf
       type: d.type,
       content: d.content,
       summary: null,
-      importance: d.importance,
+      // 渲染用降级：memory 命中有真实四维；longtail 无来源，退回上游旧占位（仅进 prompt 文本）。
+      importance: d.importance ?? 0.5,
       confidence: 0.8,
+      emotional: d.emotional ?? 0,
+      recurrence: d.recurrence ?? 0,
+      unresolved: d.unresolved ?? 0,
+      weight: d.weight ?? 0,
       status: "active",
       pinned: false,
       tags: [],

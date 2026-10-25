@@ -1,14 +1,17 @@
 import { authenticate } from "../auth/apiKey";
+import { identityNamespace, loadConfig, type GatewayConfig } from "../gateway/config";
 import { getOrCreateConversation } from "../db/conversations";
-import { fetchMemoriesByIds, getMemoryById, listMemoriesPage } from "../db/memories";
+import { fetchMemoriesByIds, getMemoryById, listMemoriesPage, softDeleteMemory } from "../db/memories";
 import { saveIngestMessages } from "../db/messages";
 import {
   archiveMemory,
+  createBaselineChangelogEntry,
   createPrecious,
-  deleteMemoryV2,
   fetchMemoryLifecycleRows,
   getDailyLog,
   getWeeklyLog,
+  listRecentDailyLogs,
+  upsertDailyLog,
   getPreciousById,
   markPreciousInjected,
   supersedeMemory,
@@ -16,11 +19,17 @@ import {
   upsertMemoryByFactKey
 } from "../db/v2";
 import { exportMemories } from "../memory/export";
+import { deleteMemoryEmbedding } from "../memory/embedding";
 import { buildBootPackage, isV2Enabled, runRecall } from "../memory/v2/recall";
 import { readDreamTimeZoneFromEnv } from "../memory/dailyDigest";
 import { withImpressionDisclaimer } from "../memory/impression";
 import { getIsoWeekLabelForDateLabel } from "../memory/weeklyRollup";
 import { searchMemories, toMemoryApiRecord } from "../memory/search";
+import {
+  AFFECT_CHORD_TOOL_DESCRIPTION,
+  AFFECT_CHORD_TOOL_HINT,
+  normalizeAffectChord
+} from "../extensions/affectChord";
 import {
   createVectorMemory,
   deleteVectorMemory,
@@ -30,10 +39,10 @@ import {
 
 import type { Env, KeyProfile, Scope } from "../types";
 import { json } from "../utils/json";
-import { getYesterdayDateLabel } from "../memory/dreamDates";
 import { formatDateLabel } from "../utils/time";
 import {
   isRecord,
+  isValidRange,
   readBoolean,
   readMessages,
   readNonNegativeInt,
@@ -120,7 +129,7 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
 // Reads that also write recall bookkeeping (counters / last-injected timestamps), never memory content.
 const BOOKKEEPING_READ = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 
-function getTools(): Array<Record<string, unknown>> {
+export function getTools(): Array<Record<string, unknown>> {
   return [
     {
       name: "memory_search",
@@ -419,6 +428,9 @@ function getTools(): Array<Record<string, unknown>> {
           content: { type: "string", description: "The memory text, one self-contained statement." },
           type: { type: "string", description: `One of ${MEMORY_TYPES_TEXT}. Other values become fact (default).` },
           importance: { type: "number", description: "0 to 1, how much this matters. Defaults to 0.6." },
+          emotional: { type: "number", description: "0 to 1, emotional intensity of this moment. Defaults to 0.0." },
+          recurrence: { type: "number", description: "0 to 1, likelihood this pattern or topic comes up again. Defaults to 0.0." },
+          unresolved: { type: "number", description: "0 to 1, whether this is still an open or pending matter; set to 0 once resolved. Defaults to 0.0." },
           confidence: { type: "number", description: "0 to 1, how sure you are it is true. Defaults to 0.8." },
           tags: { type: "array", items: { type: "string" }, description: "Free-form labels." },
           source: {
@@ -492,19 +504,70 @@ function getTools(): Array<Record<string, unknown>> {
       }
     },
     {
-      name: "diary_get",
+      name: "baseline_change",
       description:
-        "Read daily_log diary entries. These are impressions, not verified facts. " +
-        "Omit date for today+yesterday (recent). Use week (e.g. 2026-W29) for weekly_log. " +
-        "Rolled-up daily dates fall back to weekly_log. Fetch explicitly when needed; do not treat diary as ground truth.",
-      annotations: { title: "Read diary", ...READ_ONLY },
+        "Submit a pending change (add/update/delete) to this namespace's long-term baseline — the stable, " +
+        "lasting impression of the user that you maintain yourself (namespace is fixed by the MCP endpoint " +
+        "URL /mcp/<identity>). Changes are batched and merged during " +
+        "the nightly dream cycle, not applied immediately; today's submitted changes are echoed back to you " +
+        "in the next request, so do not resubmit. Use for incremental updates only; do not rewrite the whole " +
+        "baseline here.",
+      annotations: { title: "Submit baseline change", readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         type: "object",
         properties: {
-          date: { type: "string", description: "YYYY-MM-DD; omit for recent (today+yesterday)" },
+          op: {
+            type: "string",
+            description: "add | update | delete. add = new lasting impression, update = revise existing, delete = remove outdated."
+          },
+          before_content: {
+            type: "string",
+            description: "Original text to modify/delete (required for update and delete, omit for add)."
+          },
+          after_content: {
+            type: "string",
+            description: "New/updated text (required for add and update, omit for delete)."
+          },
+          reason: {
+            type: "string",
+            description: "Why the change is needed (required)."
+          }
+        },
+        required: ["op", "reason"]
+      }
+    },
+    {
+      name: "daily_log_read",
+      description:
+        "Read daily logs (namespace is fixed by the MCP endpoint URL /mcp/<identity>). " +
+        "These are impressions, not verified facts. " +
+        "date: that single day's log (rolled-up daily dates fall back to weekly_log). " +
+        "week (e.g. 2026-W29): the weekly summary. " +
+        "Omit everything for the most recent logged days (default 7, limit max 365) — " +
+        "use this to page back after an absence; today+yesterday only returns natural days and misses gaps.",
+      annotations: { title: "Read daily log", ...READ_ONLY },
+      inputSchema: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "YYYY-MM-DD; a specific day's log" },
           week: { type: "string", description: "ISO week label, e.g. 2026-W29" },
-          namespace: NAMESPACE_PARAM
+          limit: { type: "number", minimum: 1, maximum: 365, description: "Number of recent logged days to return (default 7); ignored when date or week is set" }
         }
+      }
+    },
+    {
+      name: "daily_log_write",
+      // biome-ignore format: description 为单行拼接长文本
+      description: `Append to today's daily log (namespace is fixed by the MCP endpoint URL /mcp/<identity>; date decided by the server timezone). If today's log already exists, new summary lines are appended (not overwritten) and an existing title is kept. Call this near the end of a conversation to record what was discussed. Title <= 12 chars. Summary as '- ' prefixed bullet points, <= 800 chars per call; today's merged log must stay <= 2000 chars. ${AFFECT_CHORD_TOOL_HINT}`,
+      annotations: { title: "Append daily log", readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short title for the day, <= 12 chars. Ignored if today's log already has one." },
+          summary: { type: "string", description: "Bullet-point lines to append, each starting with '- ', <= 800 chars" },
+          affect_chord: { type: "string", description: AFFECT_CHORD_TOOL_DESCRIPTION }
+        },
+        required: ["title"]
       }
     }
   ];
@@ -514,16 +577,28 @@ async function callTool(
   env: Env,
   ctx: ExecutionContext,
   profile: KeyProfile,
-  params: ToolCallParams
+  params: ToolCallParams,
+  binding: McpNamespaceBinding
 ): Promise<Record<string, unknown>> {
   const args = isRecord(params.arguments) ? params.arguments : {};
+
+  // 方案 D namespace 归属：identity 路由（/mcp/:identity）强制绑定写入空间，
+  // 忽略 args.namespace；全局 /mcp 路径上角色记忆面工具必须带 identity，报错不回退 default。
+  const toolNamespace = (): string | null => {
+    if (binding.namespace) return binding.namespace;
+    return resolveNamespace(profile, args.namespace);
+  };
+  const requireIdentity = (): string | null => {
+    if (binding.namespace) return binding.namespace;
+    return null;
+  };
 
   if (params.name === "memory_search") {
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
     const query = readString(args.query);
     if (!query) return toolError("query is required");
     const memories = await searchMemories(env, {
-      namespace: resolveNamespace(profile, args.namespace),
+      namespace: toolNamespace() ?? "default",
       query,
       topK: readNumber(args.top_k, Number(env.MEMORY_TOP_K || 50)),
       types: readStringArray(args.types)
@@ -536,10 +611,17 @@ async function callTool(
     if (isV2Enabled(env)) return toolError("memory_create is deprecated in v2; use memory_upsert with fact_key");
     const content = readString(args.content);
     if (!content) return toolError("content is required");
+    // 入口校验（裁定 #2，v1 残留路径与旧版保持一致）：拒绝越界、不收敛。
+    if (args.importance != null && !isValidRange(args.importance, 0, 1)) {
+      return toolError("importance must be between 0 and 1");
+    }
+    if (args.confidence != null && !isValidRange(args.confidence, 0, 1)) {
+      return toolError("confidence must be between 0 and 1");
+    }
     let memory: Awaited<ReturnType<typeof createVectorMemory>>;
     try {
       memory = await createVectorMemory(env, {
-        namespace: resolveNamespace(profile, args.namespace),
+        namespace: toolNamespace() ?? "default",
         type: readString(args.type) || "note",
         content,
         summary: readString(args.summary) || null,
@@ -612,7 +694,7 @@ async function callTool(
     if (!hasScope(profile, "export:read")) return toolError("Missing export:read scope");
     try {
       const result = await exportMemories(env, {
-        namespace: resolveNamespace(profile, args.namespace),
+        namespace: toolNamespace() ?? "default",
         type: readString(args.type),
         format: readString(args.format) || "json"
       });
@@ -628,12 +710,14 @@ async function callTool(
     if (!id) return toolError("id is required");
 
     // v2: 走 D1，能拿到 fact_key upsert / supersede 写入的记录。
+    // 删除语义（P5-A）：软删后的行对工具面不可见——模型侧"删了就是没了"，
+    // REST GET /v1/memories/:id 保留原行为（deleted 行可读，供核查/恢复）。
     if (isV2Enabled(env)) {
       const record = await getMemoryById(env.DB, {
-        namespace: resolveNamespace(profile, args.namespace),
+        namespace: toolNamespace() ?? "default",
         id
       });
-      if (!record) return toolError("Memory not found");
+      if (!record || record.status === "deleted") return toolError("Memory not found");
       const lifecycleRows = await fetchMemoryLifecycleRows(env.DB, [record.id]);
       return textToolResult({ data: toMemoryApiRecord(record, undefined, lifecycleRows[0] ?? null) });
     }
@@ -648,13 +732,21 @@ async function callTool(
     const id = readString(args.id);
     if (!id) return toolError("id is required");
 
-    // v2: 硬删 D1 + 向量 (本体和镜像一起删)，找不到返回 false。
+    // v2: 软删——标 status='deleted'，D1 行与 lifecycle/版本链保留（可恢复、供核查/迁移）。
+    // 向量 best-effort：删除失败只记日志，不回滚软删、不向调用方谎报失败。
+    // 已删除/跨 namespace/不存在保持未命中。行为模板 = 旧 4cc0263，
+    // 与 REST DELETE /v1/memories/:id 同语义（softDeleteMemory + 向量 best-effort）。
     if (isV2Enabled(env)) {
-      const deleted = await deleteMemoryV2(env, {
-        namespace: resolveNamespace(profile, args.namespace),
-        id
-      });
+      const namespace = toolNamespace() ?? "default";
+      const existing = await getMemoryById(env.DB, { namespace, id });
+      if (!existing || existing.status === "deleted") return toolError("Memory not found");
+      const deleted = await softDeleteMemory(env.DB, { namespace, id });
       if (!deleted) return toolError("Memory not found");
+      try {
+        await deleteMemoryEmbedding(env, deleted);
+      } catch (error) {
+        console.error("mcp memory_delete: vector delete failed (D1 soft-deleted, vector may linger)", { id, error });
+      }
       return textToolResult({ data: { id, deleted: true } });
     }
 
@@ -723,7 +815,7 @@ async function callTool(
     const query = readString(args.query);
     if (!query) return toolError("query is required");
     const result = await runRecall(env, {
-      namespace: resolveNamespace(profile, args.namespace),
+      namespace: toolNamespace() ?? "default",
       query,
       k: readNumber(args.k, 20),
       min_score: typeof args.min_score === "number" ? readNumber(args.min_score, 0.15) : undefined,
@@ -739,7 +831,7 @@ async function callTool(
     const content = readString(args.content);
     if (!content) return toolError("content is required");
     const precious = await createPrecious(env.DB, {
-      namespace: resolveNamespace(profile, args.namespace),
+      namespace: toolNamespace() ?? "default",
       content,
       contextMessageIds: readStringArray(args.context_message_ids)
     });
@@ -754,7 +846,7 @@ async function callTool(
     if (!term) return toolError("term is required");
     if (!definition) return toolError("definition is required");
     const row = await upsertGlossary(env.DB, {
-      namespace: resolveNamespace(profile, args.namespace),
+      namespace: toolNamespace() ?? "default",
       term,
       aliases: readStringArray(args.aliases),
       definition,
@@ -770,14 +862,23 @@ async function callTool(
     const content = readString(args.content);
     if (!factKey) return toolError("fact_key is required");
     if (!content) return toolError("content is required");
+    // 四维/置信度入口校验（裁定 #2）：MCP 拒绝越界、不收敛，与旧版一致。
+    for (const dim of ["importance", "confidence", "emotional", "recurrence", "unresolved"] as const) {
+      if (args[dim] != null && !isValidRange(args[dim], 0, 1)) {
+        return toolError(`${dim} must be between 0 and 1`);
+      }
+    }
     try {
       const result = await upsertMemoryByFactKey(env, {
-        namespace: resolveNamespace(profile, args.namespace),
+        namespace: toolNamespace() ?? "default",
         factKey,
         content,
         type: readString(args.type) || "fact",
         importance: readNumber(args.importance, 0.6),
         confidence: readNumber(args.confidence, 0.8),
+        emotional: readNumber(args.emotional, 0.0),
+        recurrence: readNumber(args.recurrence, 0.0),
+        unresolved: readNumber(args.unresolved, 0.0),
         tags: readStringArray(args.tags),
         source: readString(args.source) || "mcp",
         validAsOf: readString(args.valid_as_of),
@@ -799,7 +900,7 @@ async function callTool(
     if (!newContent) return toolError("new_content is required");
     try {
       const result = await supersedeMemory(env, {
-        namespace: resolveNamespace(profile, args.namespace),
+        namespace: toolNamespace() ?? "default",
         oldId,
         newContent,
         newType: readString(args.new_type) || "world_fact",
@@ -823,11 +924,38 @@ async function callTool(
     const id = readString(args.id);
     if (!id) return toolError("id is required");
     const archived = await archiveMemory(env, {
-      namespace: resolveNamespace(profile, args.namespace),
+      namespace: toolNamespace() ?? "default",
       id
     });
     if (!archived) return toolError("Memory not found");
     return textToolResult({ data: { id, archived: true } });
+  }
+
+  if (params.name === "baseline_change") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const namespace = requireIdentity();
+    if (!namespace) {
+      return toolError("baseline_change requires an identity-bound MCP endpoint: use /mcp/<identity> (namespace is fixed by the URL, not by arguments)");
+    }
+    const op = readString(args.op);
+    const reason = readString(args.reason);
+    if (!op || !["add", "update", "delete"].includes(op)) {
+      return toolError("op must be add, update, or delete");
+    }
+    if (!reason) return toolError("reason is required");
+    const beforeContent = readString(args.before_content) ?? null;
+    const afterContent = readString(args.after_content) ?? null;
+    if (op === "add" && !afterContent) return toolError("add requires after_content");
+    if (op === "update" && (!beforeContent || !afterContent)) return toolError("update requires before_content and after_content");
+    if (op === "delete" && !beforeContent) return toolError("delete requires before_content");
+    const row = await createBaselineChangelogEntry(env.DB, {
+      namespace,
+      op: op as "add" | "update" | "delete",
+      beforeContent,
+      afterContent,
+      reason
+    });
+    return textToolResult({ data: row });
   }
 
   if (params.name === "digest_get" || params.name === "digest_set") {
@@ -842,9 +970,12 @@ async function callTool(
     );
   }
 
-  if (params.name === "diary_get") {
+  if (params.name === "daily_log_read" || params.name === "diary_get") {
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
-    const namespace = resolveNamespace(profile, args.namespace);
+    const namespace = requireIdentity();
+    if (!namespace) {
+      return toolError("daily_log_read requires an identity-bound MCP endpoint: use /mcp/<identity> (namespace is fixed by the URL, not by arguments)");
+    }
     const timeZone = readDreamTimeZoneFromEnv(env);
     const week = readString(args.week);
     if (week && !/^\d{4}-W\d{2}$/.test(week)) {
@@ -862,20 +993,58 @@ async function callTool(
     if (date) {
       const row = await getDailyLog(env.DB, { namespace, date });
       if (row) return textToolResult({ data: withImpressionDisclaimer({ ...row }) });
+      // 指定日期的日记已卷入周记时回退（上游 diary_get 能力）。
       const weekLabel = getIsoWeekLabelForDateLabel(date, timeZone);
       const weekly = await getWeeklyLog(env.DB, { namespace, week: weekLabel });
       if (!weekly) return textToolResult({ data: null });
       return textToolResult({ data: withImpressionDisclaimer({ ...weekly, note: "daily rolled into weekly" }) });
     }
-    const today = formatDateLabel(new Date(), timeZone);
-    const yesterday = getYesterdayDateLabel(timeZone);
-    const rows = await Promise.all([
-      getDailyLog(env.DB, { namespace, date: today }),
-      getDailyLog(env.DB, { namespace, date: yesterday })
-    ]);
+    // 无 date 无 week：最近 N 个有记录日期（旧 daily_log_read 能力，向前翻页靠它）。
+    const limit = readPositiveInt(args.limit, 7, 365);
+    const rows = await listRecentDailyLogs(env.DB, { namespace, limit });
     return textToolResult({
-      data: rows.filter((row) => row !== null).map((row) => withImpressionDisclaimer({ ...row }))
+      data: rows.map((row) => withImpressionDisclaimer({ ...row }))
     });
+  }
+
+  if (params.name === "daily_log_write") {
+    if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
+    const namespace = requireIdentity();
+    if (!namespace) {
+      return toolError("daily_log_write requires an identity-bound MCP endpoint: use /mcp/<identity> (namespace is fixed by the URL, not by arguments)");
+    }
+    const timeZone = readDreamTimeZoneFromEnv(env);
+    const date = formatDateLabel(new Date(), timeZone);
+    const title = readString(args.title);
+    if (!title) return toolError("title is required");
+    if (title.length > 12) return toolError("title must be <= 12 characters");
+    const newSummary = readString(args.summary) || "";
+    if (newSummary.length > 800) return toolError("summary must be <= 800 characters");
+
+    // 追加语义：今天已有日志时保留原标题，summary 追加不覆盖。
+    const existing = await getDailyLog(env.DB, { namespace, date });
+    let mergedTitle = title;
+    let mergedSummary = newSummary;
+    if (existing) {
+      mergedTitle = existing.title || title;
+      const existingSummary = (existing.summary || "").trim();
+      const appendSummary = newSummary.trim();
+      mergedSummary = existingSummary && appendSummary
+        ? `${existingSummary}\n${appendSummary}`
+        : existingSummary || appendSummary;
+    }
+    if (mergedSummary.length > 2000) {
+      return toolError("merged summary exceeds 2000 characters; today's log is getting too long");
+    }
+
+    // Affect chord: new value replaces existing; omitting preserves existing (handled by COALESCE in DB layer)
+    const affectChord = normalizeAffectChord(args.affect_chord);
+
+    const log = await upsertDailyLog(env.DB, {
+      namespace, date, title: mergedTitle, summary: mergedSummary, affectChord,
+      sourceMessageIds: existing?.source_message_ids ?? []
+    });
+    return textToolResult({ data: log });
   }
 
   return toolError(`Unknown tool: ${String(params.name || "")}`);
@@ -885,7 +1054,8 @@ async function handleRpc(
   request: JsonRpcRequest,
   env: Env,
   ctx: ExecutionContext,
-  profile: KeyProfile
+  profile: KeyProfile,
+  binding: McpNamespaceBinding
 ): Promise<Record<string, unknown> | null> {
   if (!request.id && request.method?.startsWith("notifications/")) return null;
 
@@ -911,7 +1081,7 @@ async function handleRpc(
 
   if (request.method === "tools/call") {
     const params = isRecord(request.params) ? (request.params as ToolCallParams) : {};
-    const result = await callTool(env, ctx, profile, params);
+    const result = await callTool(env, ctx, profile, params, binding);
     return rpcResult(request.id, result);
   }
 
@@ -922,7 +1092,13 @@ async function handleRpc(
   return rpcError(request.id, -32601, "Method not found");
 }
 
-export async function handleMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export interface McpNamespaceBinding {
+  /** identity 路由（/mcp/:identity）强制绑定的写入空间；null = 旧全局 /mcp 路径。 */
+  namespace: string | null;
+}
+
+export async function handleMcp(request: Request, env: Env, ctx: ExecutionContext,
+  identitySlug: string | null = null): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
   }
@@ -943,6 +1119,22 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
   const auth = await authenticate(withTokenQuery(request), env);
   if (!auth.ok) return rpcErrorResponse(null, -32001, "Unauthorized", 401);
 
+  // 方案 D：/mcp/:identity 从 Gateway identity 配置解析并强制绑定 namespace。
+  // 模型侧工具不再接受 namespace 参数——归属由 URL 决定，传错必报错，不回退 default。
+  // 注意不走 allowedIdentities（那要求 chat:proxy scope）；MCP 是记忆面，只按 key 成员匹配。
+  let binding: McpNamespaceBinding = { namespace: null };
+  if (identitySlug) {
+    let config: GatewayConfig;
+    try { config = await loadConfig(env); }
+    catch { return rpcErrorResponse(null, -32002, "Gateway configuration unavailable. Apply migrations and check /admin.", 503); }
+    const identity = config.identities.find(i => i.slug === identitySlug && i.keys.includes(auth.keyName));
+    if (!identity) {
+      return rpcErrorResponse(null, -32003,
+        `No identity "${identitySlug}" available for this key. Configure /admin, then use /mcp/<identity>.`, 404);
+    }
+    binding = { namespace: identityNamespace(identity) };
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -955,7 +1147,7 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
       await Promise.all(
         body
           .filter((item): item is JsonRpcRequest => isRecord(item))
-          .map((item) => handleRpc(item, env, ctx, auth.profile))
+          .map((item) => handleRpc(item, env, ctx, auth.profile, binding))
       )
     ).filter((item): item is Record<string, unknown> => item !== null);
     return results.length > 0 ? json(results) : new Response(null, { status: 202 });
@@ -963,7 +1155,7 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
 
   if (!isRecord(body)) return rpcErrorResponse(null, -32600, "Invalid Request", 400);
 
-  const result = await handleRpc(body, env, ctx, auth.profile);
+  const result = await handleRpc(body, env, ctx, auth.profile, binding);
   return result ? json(result) : new Response(null, { status: 202 });
 }
 

@@ -3,6 +3,8 @@ import { newId } from "../utils/ids";
 import { clampScore, parseStringArray, readString } from "../utils/parse";
 import { nowIso } from "../utils/time";
 import { createEmbedding } from "./embedding";
+import { computeWeight } from "../extensions/memoryWeight";
+import { memoryRankScore } from "../extensions/memoryRanking";
 import { deleteFtsRow, upsertMemoryFts } from "./fts";
 import { clampMemoryType } from "./canonicalTypes";
 import { deleteTriggersForMemory } from "../db/v2";
@@ -17,6 +19,9 @@ export interface VectorMemoryInput {
   summary?: string | null;
   importance?: number;
   confidence?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
   pinned?: boolean;
   tags?: string[];
   source?: string | null;
@@ -110,6 +115,12 @@ export function vectorMetadataToMemoryRecord(
     summary: readString(metadata.summary),
     importance: clampScore(metadata.importance, 0.5),
     confidence: clampScore(metadata.confidence, 0.8),
+    // 向量 metadata 不存四维（旧版一致）：纯 metadata 构造的记录四维硬编码 0，
+    // D1 为唯一真源；有 D1 本体的路径（getVectorMemory 等）优先用 D1 记录。
+    emotional: 0,
+    recurrence: 0,
+    unresolved: 0,
+    weight: 0,
     status,
     pinned: readBoolean(metadata.pinned),
     tags: parseStringArray(metadata.tags),
@@ -164,6 +175,11 @@ function memoryRecordToApiRecord(record: MemoryRecord): MemoryApiRecord {
     summary: record.summary,
     importance: record.importance,
     confidence: record.confidence,
+    // P3：D1 本体四维透出（旧分支 memoryRecordToApiRecord 同位）。
+    emotional: record.emotional,
+    recurrence: record.recurrence,
+    unresolved: record.unresolved,
+    weight: record.weight,
     status: record.status,
     pinned: Boolean(record.pinned),
     tags: parseStringArray(record.tags),
@@ -187,6 +203,16 @@ function toMemoryRecord(input: Required<VectorMemoryInput> & { id: string; vecto
     summary: input.summary,
     importance: input.importance,
     confidence: input.confidence,
+    emotional: input.emotional,
+    recurrence: input.recurrence,
+    unresolved: input.unresolved,
+    // weight 写入时由 computeWeight 计算（唯一权威实现，旧 toMemoryRecord 同语义）。
+    weight: computeWeight({
+      importance: input.importance,
+      emotional: input.emotional,
+      recurrence: input.recurrence,
+      unresolved: input.unresolved
+    }),
     status: "active",
     pinned: input.pinned ? 1 : 0,
     tags: JSON.stringify(input.tags),
@@ -205,9 +231,9 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
   const memoryInsert = env.DB
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, summary, importance, confidence, status,
-        pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, namespace, type, content, summary, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       record.id,
@@ -217,6 +243,10 @@ async function insertMemoryRecord(env: Env, record: MemoryRecord): Promise<void>
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -294,7 +324,8 @@ async function updateMemoryRecord(env: Env, record: MemoryRecord): Promise<Memor
   await env.DB
     .prepare(
       `UPDATE memories SET
-        type = ?, content = ?, summary = ?, importance = ?, confidence = ?, status = ?,
+        type = ?, content = ?, summary = ?, importance = ?, confidence = ?,
+        emotional = ?, recurrence = ?, unresolved = ?, weight = ?, status = ?,
         pinned = ?, tags = ?, source = ?, source_message_ids = ?, vector_id = ?,
         updated_at = ?, expires_at = ?
        WHERE namespace = ? AND id = ?`
@@ -305,6 +336,10 @@ async function updateMemoryRecord(env: Env, record: MemoryRecord): Promise<Memor
       record.summary,
       record.importance,
       record.confidence,
+      record.emotional,
+      record.recurrence,
+      record.unresolved,
+      record.weight,
       record.status,
       record.pinned,
       record.tags,
@@ -355,6 +390,10 @@ export async function createVectorMemory(env: Env, input: VectorMemoryInput): Pr
     summary: input.summary ?? null,
     importance: clampScore(input.importance, 0.5),
     confidence: clampScore(input.confidence, 0.8),
+    // v1 vector 路径的旧版边缘规则：入口 clampScore 收敛（不拒绝），三维缺省 0。
+    emotional: clampScore(input.emotional, 0),
+    recurrence: clampScore(input.recurrence, 0),
+    unresolved: clampScore(input.unresolved, 0),
     pinned: Boolean(input.pinned),
     tags: input.tags ?? [],
     source: input.source ?? null,
@@ -390,21 +429,29 @@ export async function getVectorMemory(
   id: string,
   options?: { requireD1Backing?: boolean }
 ): Promise<MemoryApiRecord | null> {
-  if (options?.requireD1Backing) {
-    const d1Record = await getMemoryRecordById(env, id);
-    return d1Record ? memoryRecordToApiRecord(d1Record) : null;
-  }
+  // P3 读取顺序裁定：D1 本体是四维/weight 的唯一真源——有 D1 记录必须返回 D1 完整记录。
+  // Vectorize metadata 不存四维，metadata 优先会把 D1 正常记忆的四维归零。
+  // 只有 D1 查不到（legacy/orphan 向量）才允许返回 metadata 记录。
+  // public id 与 vector id 两种查询方式都经 candidateMemoryIds 归一到 D1 主键。
+  const d1Record = await getMemoryRecordById(env, id);
+  if (d1Record) return memoryRecordToApiRecord(d1Record);
+
+  if (options?.requireD1Backing) return null;
 
   const vectorIds = candidateVectorIds(id);
   const vectors = vectorIds.length > 0 ? await requireVectorize(env).getByIds(vectorIds) : [];
 
   for (const vector of vectors) {
     const record = vectorMetadataToMemoryRecord(vector);
-    if (record) return record;
+    if (!record) continue;
+    // 向量 id 形态对不上 memory id 时（如非 mem_ 前缀的旧向量），metadata 的 ref_id
+    // 若能对上 D1 本体，仍以 D1 为准；对不上才是真孤儿，按旧口径返回 metadata 记录。
+    const backing = await getMemoryRecordById(env, record.id);
+    if (backing) return memoryRecordToApiRecord(backing);
+    return record;
   }
 
-  const d1Record = await getMemoryRecordById(env, id);
-  return d1Record ? memoryRecordToApiRecord(d1Record) : null;
+  return null;
 }
 
 export async function deleteVectorMemory(env: Env, id: string): Promise<boolean> {
@@ -444,6 +491,16 @@ export async function updateVectorMemory(
   const existing = await getVectorMemory(env, id);
   if (!existing) return null;
 
+  // getVectorMemory 优先从向量 metadata 构造记录，那里没存四维（旧版如此，v2 亦然；
+  // 四维不进 Vectorize metadata 是 P3 的开放项，当前保持不存）。
+  // 四维以 D1 为准，必须回读本体，否则更新一次就把记录的维度数据清零。
+  const d1Row = await getMemoryRecordById(env, existing.id);
+  const inheritedDims = {
+    emotional: d1Row?.emotional ?? 0,
+    recurrence: d1Row?.recurrence ?? 0,
+    unresolved: d1Row?.unresolved ?? 0
+  };
+
   const content = (patch.content ?? existing.content).trim();
   if (!content) return null;
 
@@ -478,6 +535,9 @@ export async function updateVectorMemory(
     summary: patch.summary === undefined ? existing.summary : patch.summary,
     importance: clampScore(patch.importance, existing.importance),
     confidence: clampScore(patch.confidence, existing.confidence),
+    emotional: inheritedDims.emotional,
+    recurrence: inheritedDims.recurrence,
+    unresolved: inheritedDims.unresolved,
     status: patch.status ?? existing.status,
     pinned: patch.pinned ?? existing.pinned,
     tags: patch.tags ?? existing.tags,
@@ -498,6 +558,11 @@ export async function updateVectorMemory(
     summary: next.summary,
     importance: next.importance,
     confidence: next.confidence,
+    emotional: next.emotional,
+    recurrence: next.recurrence,
+    unresolved: next.unresolved,
+    // importance 可能被 patch 改动，weight 随之重算（与 db/memories.updateMemory 对齐）。
+    weight: computeWeight({ importance: next.importance, ...inheritedDims }),
     status: next.status,
     pinned: next.pinned ? 1 : 0,
     tags: JSON.stringify(next.tags),
@@ -587,7 +652,7 @@ export async function searchVectorMemories(
       if (input.types && input.types.length > 0 && !input.types.includes(record.type)) return [];
       return [record];
     })
-    .sort((a, b) => (b.score ?? 0) + b.importance * 0.05 - ((a.score ?? 0) + a.importance * 0.05))
+    .sort((a, b) => memoryRankScore(b.score ?? 0, b.importance) - memoryRankScore(a.score ?? 0, a.importance))
     .slice(0, topK);
 }
 

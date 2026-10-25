@@ -36,6 +36,10 @@ export interface SelectorInput {
   visible?: string;
   entries: SurfaceEntry[];
   maxItems: number;
+  /** 本 namespace（写入 ns）候选的排序加成倍数，默认 1（不加权）。 */
+  boostNamespace?: string;
+  /** boost 倍数，≥1；沿用旧 RECALL_ROLE_BOOST 语义。 */
+  boostFactor?: number;
 }
 
 const MAX_CANDIDATES = 16;
@@ -228,11 +232,16 @@ async function rerankedSelection(env: Env, input: SelectorInput, candidates: Sel
   try {
     const scores = await scoreRecallSpans(env, shaped.embeddingQuery, spans.map(s =>
       s.c.entry.speaker ? `${s.c.entry.speaker}: ${s.text}` : s.text));
+    // 写入 ns 的候选在全局 rerank 后按 boost 提前（旧 RECALL_ROLE_BOOST 语义）：
+    // 只改变跨 ns 竞争的相对顺序，决策里暴露的分仍是原始 rerank 分。
+    // 授权的其他 namespace（如 shared）不加权。
+    const factor = input.boostFactor && input.boostFactor >= 1 ? input.boostFactor : 1;
     const ranked = candidates.map(c => {
       const indices = spans.flatMap((s, i) => s.c === c ? [i] : []);
       const best = indices.reduce((a, b) => scores[b] > scores[a] ? b : a);
-      return { ...spans[best], score: scores[best] };
-    }).sort((a, b) => b.score - a.score);
+      return { ...spans[best], score: scores[best],
+        rank: scores[best] * (input.boostNamespace && c.entry.namespace === input.boostNamespace ? factor : 1) };
+    }).sort((a, b) => b.rank - a.rank || b.score - a.score);
     const picked = pickEntries(ranked, input, purpose, threshold);
     return { model, threshold, status: "reranked", entries: picked.entries, decisions: picked.decisions,
       elapsedMs: Date.now() - start };

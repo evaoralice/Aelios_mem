@@ -25,7 +25,7 @@ import {
 import { getIsoWeekLabelForDateLabel } from "../weeklyRollup";
 import { searchMemoriesWithProvenance } from "../search";
 import type { MemoryApiRecordWithProvenance } from "../search";
-import { filterAndCompressMemories } from "../filter";
+import { filterAndCompressMemoriesWithMeta } from "../filter";
 import { createEmbedding } from "../embedding";
 import { shapeRecallQuery } from "../queryShape";
 import { expandRecallByRelations, isRelationExpansionEnabled } from "../relations";
@@ -356,6 +356,13 @@ export interface RecallHit {
   event_date?: string | null;
   fact_key?: string | null;
   source_message_ids?: string[];
+  // P3 四维透传（additive，旧分支 RecallHit 无此组字段）：memory 命中从 D1 记录
+  // 带真实值；longtail 表无四维列，命中不伪造（字段缺省）。weight 不参与排序。
+  importance?: number;
+  emotional?: number;
+  recurrence?: number;
+  unresolved?: number;
+  weight?: number;
   // LMC-5 Y 轴 (additive, only when RELATION_EXPANSION on and hit came via edge)
   relation?: RelationExpansionMeta;
   contradicted_by?: string[];
@@ -469,11 +476,17 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   // 2.5. Rank with the reranker, but do not apply the auto-injection
   // 2-item budget here. MCP / REST active recall needs the full k;
   // the gateway surface trims after this.
-  const memories = (await filterAndCompressMemories(env, {
+  const filterResult = await filterAndCompressMemoriesWithMeta(env, {
     query,
     memories: rawMemories,
     maxOutput: k
-  })) as MemoryApiRecordWithProvenance[];
+  });
+  const memories = filterResult.data as MemoryApiRecordWithProvenance[];
+  // P5-D (= 旧 78e2a7e P2-7): 区分"过滤后确实为空"和"过滤失败(fail-closed 清空)"。
+  // 失败时不允许落 longtail 兜底——模型故障时给用户注入回收站内容
+  // 比"没有记忆"更糟（召回要准确，宁缺毋滥）。
+  const filterFailed =
+    filterResult.meta.status === "error" && !filterResult.meta.fallback_used && memories.length === 0;
 
   // 3. 闸三: last_injected_at 近期注入过的降权 (不动 importance)。
   //    #37: score 是排序分 (原始分 × 降权 × 亲笔加成)；raw_score 是原始相关性分，闸四地板判它。
@@ -506,7 +519,12 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
       recorded_date: m.created_at ?? null,
       event_date: m.valid_as_of ?? null,
       fact_key: m.fact_key ?? null,
-      source_message_ids: m.source_message_ids
+      source_message_ids: m.source_message_ids,
+      importance: m.importance,
+      emotional: m.emotional,
+      recurrence: m.recurrence,
+      unresolved: m.unresolved,
+      weight: m.weight
     };
   });
 
@@ -550,8 +568,9 @@ export async function runRecall(env: Env, input: RecallInput): Promise<RecallRes
   // 5. 长尾兜底 (L6): 只有 glossary + memories 闸二后全空才落 longtail。
   //    母帖逻辑优先级"全空才落长尾"——glossary 命中也算"前面非空"，
   //    有确定词面答案时不再追兜底，避免把 longtail 混进已有黑话答案的请求。
+  //    过滤管线失败（fail-closed 清空）不算"真空"，不落兜底（P5-D）。
   let longtailHits: RecallHit[] = [];
-  if (afterRelation.length === 0 && glossaryHits.length === 0) {
+  if (afterRelation.length === 0 && glossaryHits.length === 0 && !filterFailed) {
     longtailHits = await recallLongtailFallback(env, input);
   }
 

@@ -3,6 +3,7 @@ import {
   markMemoriesRecalled,
   searchMemoriesByText
 } from "../db/memories";
+import { memoryRankScore } from "../extensions/memoryRanking";
 import type { Env, MemoryApiRecord, MemoryLifecycleRow, MemoryRecord } from "../types";
 import { createEmbedding } from "./embedding";
 import { keepGroundedHits, mergeHybridRanks, tokenizeQuery } from "./queryShape";
@@ -69,6 +70,11 @@ export function toMemoryApiRecord(
     summary: record.summary,
     importance: record.importance,
     confidence: record.confidence,
+    // P3：四维与 weight 从 D1 本体透出（旧分支同位必填）；weight 不参与排序。
+    emotional: record.emotional,
+    recurrence: record.recurrence,
+    unresolved: record.unresolved,
+    weight: record.weight,
     status: record.status,
     pinned: Boolean(record.pinned),
     tags: parseJsonArray(record.tags),
@@ -210,6 +216,11 @@ function toLegacyMemoryRecord(
     summary: readMetadataString(metadata, "summary"),
     importance: readMetadataNumber(metadata, "importance", 0.5),
     confidence: readMetadataNumber(metadata, "confidence", 0.8),
+    // 向量 metadata 不存四维（与旧版一致）：这里硬编码 0，四维与 weight 以 D1 本体为准。
+    emotional: 0,
+    recurrence: 0,
+    unresolved: 0,
+    weight: 0,
     status: status === "superseded" ? "superseded" : "active",
     pinned: readMetadataBoolean(metadata, "pinned") ? 1 : 0,
     tags,
@@ -345,7 +356,7 @@ async function searchWithVectorize(
     : Math.max(0, Math.min(input.topK - d1Records.length, legacyFallbackLimit));
   const legacyOnlyRecords = legacySlots > 0
     ? legacyCandidates
-      .sort((a, b) => b.score + b.importance * 0.05 - (a.score + a.importance * 0.05))
+      .sort((a, b) => memoryRankScore(b.score, b.importance) - memoryRankScore(a.score, a.importance))
       .slice(0, legacySlots)
       .map((record) => ({
         ...record,
@@ -357,7 +368,7 @@ async function searchWithVectorize(
   const unbackedDropped = requireD1Backing ? legacyCandidates.length : 0;
 
   const records = [...d1Records, ...legacyOnlyRecords].sort(
-    (a, b) => b.score + b.importance * 0.05 - (a.score + a.importance * 0.05)
+    (a, b) => memoryRankScore(b.score, b.importance) - memoryRankScore(a.score, a.importance)
   ).slice(0, input.topK);
 
   return { records, lifecycleByMemoryId, unbackedDropped };

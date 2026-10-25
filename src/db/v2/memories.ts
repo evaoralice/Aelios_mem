@@ -1,6 +1,8 @@
 import { upsertMemoryEmbedding } from "../../memory/embedding";
 import { deleteFtsRow, upsertMemoryFts } from "../../memory/fts";
 import { clampMemoryType } from "../../memory/canonicalTypes";
+import { dimensionsForCreate, dimensionsForInherit } from "../../extensions/memoryDimensions";
+import { MEMORY_DIMENSION_DEFAULTS } from "../../extensions/memoryWeight";
 import type {
   Env,
   MemoryLifecycleRow,
@@ -172,7 +174,7 @@ export async function fetchMemoryLifecycleRows(
 // 同时写 D1 (本体) 和 Vectorize (检索镜像)，设 vector_id，否则 recall 召不到。
 export async function upsertMemoryByFactKey(
   env: Env,
-  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null; authoredBy?: string | null; responseTendency?: string | null }
+  input: { namespace: string; factKey: string; content: string; type?: string; importance?: number; confidence?: number; emotional?: number; recurrence?: number; unresolved?: number; tags?: string[]; source?: string | null; sourceMessageIds?: string[]; validAsOf?: string | null; authoredBy?: string | null; responseTendency?: string | null }
 ): Promise<{ id: string; created: boolean }> {
   const db = env.DB;
   const now = nowIso();
@@ -181,9 +183,10 @@ export async function upsertMemoryByFactKey(
 
   // 先查同 fact_key 的 current active memory：本体 fact_key 优先，侧车兜底。
   // version_status=superseded 不参与 upsert 命中（LMC-5）。
+  // 四维随行取出：命中后未提供新值的维度继承旧值，不重置（旧 db/v2.ts 语义）。
   const existing = await db
     .prepare(
-      `SELECT m.id, m.authored_by, m.response_tendency FROM memories m
+      `SELECT m.id, m.importance, m.emotional, m.recurrence, m.unresolved, m.authored_by, m.response_tendency FROM memories m
        LEFT JOIN memory_lifecycle lc ON lc.memory_id = m.id
        WHERE m.namespace = ? AND m.status = 'active'
          AND (m.version_status IS NULL OR m.version_status IN ('current', 'under_review'))
@@ -192,19 +195,22 @@ export async function upsertMemoryByFactKey(
        LIMIT 1`
     )
     .bind(input.namespace, input.factKey, input.factKey)
-    .first<{ id: string; authored_by: string | null; response_tendency: string | null }>();
+    .first<{ id: string; importance: number; emotional: number; recurrence: number; unresolved: number; authored_by: string | null; response_tendency: string | null }>();
 
   if (existing) {
     // E 轴保护：亲笔记忆不接受蒸馏链改写 (dream/judge 的候选路径可提案，落笔归人)。
     if (existing.authored_by && !handSource) {
       throw new HandAuthoredProtectedError(existing.id);
     }
-    // 更新 memories 本体 (v1 列 + LMC-5 fact_key/version_status)。
+    // 未传的四维继承旧值，weight 随四维重算（旧 upsertMemoryByFactKey 语义）。
+    const dims = dimensionsForInherit(input, existing);
+    // 更新 memories 本体 (v1 列 + 四维 + LMC-5 fact_key/version_status)。
     // E 轴两列只在亲手来源时更新；不传就继承已有值 (亲手改内容不该抹掉旧署名)，
     // 与 supersede 的继承原则一致。蒸馏链更新一条无主记忆时不碰它们 (保持 null)。
     await db
       .prepare(
         `UPDATE memories SET content = ?, type = ?, importance = ?, confidence = ?,
+          emotional = ?, recurrence = ?, unresolved = ?, weight = ?,
           tags = ?, source = ?, source_message_ids = ?, updated_at = ?,
           fact_key = ?, version_status = COALESCE(version_status, 'current')${
             handSource ? ", authored_by = ?, response_tendency = ?" : ""
@@ -214,8 +220,12 @@ export async function upsertMemoryByFactKey(
       .bind(
         input.content,
         clampMemoryType(input.type, "fact"),
-        input.importance ?? 0.6,
+        dims.importance,
         input.confidence ?? 0.8,
+        dims.emotional,
+        dims.recurrence,
+        dims.unresolved,
+        dims.weight,
         JSON.stringify(input.tags ?? []),
         input.source ?? null,
         JSON.stringify(input.sourceMessageIds ?? []),
@@ -243,24 +253,30 @@ export async function upsertMemoryByFactKey(
     return { id: existing.id, created: false };
   }
 
-  // 新增：先插 memories 本体 (v1 列 + vector_id + LMC-5 版本列 + E 轴列)，再插侧车行。
+  // 新增：先插 memories 本体 (v1 列 + 四维 + vector_id + LMC-5 版本列 + E 轴列)，再插侧车行。
+  // 四维缺省走 upsertByFactKey 路径默认值（0.6/0/0/0），weight = computeWeight。
   const id = newId("mem");
   const vectorId = `mem_${id}`;
+  const dims = dimensionsForCreate(input, MEMORY_DIMENSION_DEFAULTS.upsertByFactKey);
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        id, namespace, type, content, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
         fact_key, version_status, superseded_by, authored_by, response_tendency
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
     )
     .bind(
       id,
       input.namespace,
       clampMemoryType(input.type, "fact"),
       input.content,
-      input.importance ?? 0.6,
+      dims.importance,
       input.confidence ?? 0.8,
+      dims.emotional,
+      dims.recurrence,
+      dims.unresolved,
+      dims.weight,
       JSON.stringify(input.tags ?? []),
       input.source ?? null,
       JSON.stringify(input.sourceMessageIds ?? []),
@@ -394,6 +410,9 @@ export async function supersedeMemory(
     reason?: string | null;
     importance?: number;
     confidence?: number;
+    emotional?: number;
+    recurrence?: number;
+    unresolved?: number;
     tags?: string[];
     source?: string | null;
     sourceMessageIds?: string[];
@@ -412,9 +431,10 @@ export async function supersedeMemory(
     authoredBy: input.authoredBy,
     responseTendency: input.responseTendency
   });
+  // 四维随行取出：supersede 恒继承旧四维（裁定 #3），未显式提供时新条沿用旧值。
   const old = await db
     .prepare(
-      "SELECT id, status, vector_id, fact_key, type, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?"
+      "SELECT id, status, vector_id, fact_key, type, importance, emotional, recurrence, unresolved, authored_by, response_tendency FROM memories WHERE namespace = ? AND id = ?"
     )
     .bind(input.namespace, input.oldId)
     .first<{
@@ -423,6 +443,10 @@ export async function supersedeMemory(
       vector_id: string | null;
       fact_key: string | null;
       type: string;
+      importance: number;
+      emotional: number;
+      recurrence: number;
+      unresolved: number;
       authored_by: string | null;
       response_tendency: string | null;
     }>();
@@ -451,21 +475,28 @@ export async function supersedeMemory(
   const newFactKey = inheritedFactKey;
 
   if (!old) {
+    // 新分支扩展路径：旧条不存在时不抛错，直接新建（oldStatus 'missing'）。
+    // 无旧条可继承，四维走 upsertByFactKey 默认值（0.6/0/0/0）。
+    const dims = dimensionsForCreate(input, MEMORY_DIMENSION_DEFAULTS.upsertByFactKey);
     await db
       .prepare(
         `INSERT INTO memories (
-          id, namespace, type, content, importance, confidence, status, pinned,
-          tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+          id, namespace, type, content, importance, confidence, emotional, recurrence, unresolved, weight,
+          status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
           fact_key, version_status, superseded_by, authored_by, response_tendency
-        ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
       )
       .bind(
         nextId,
         input.namespace,
         clampMemoryType(input.newType, "fact"),
         input.newContent,
-        input.importance ?? 0.6,
+        dims.importance,
         input.confidence ?? 0.8,
+        dims.emotional,
+        dims.recurrence,
+        dims.unresolved,
+        dims.weight,
         JSON.stringify(input.tags ?? []),
         effectiveSource,
         JSON.stringify(input.sourceMessageIds ?? []),
@@ -520,21 +551,27 @@ export async function supersedeMemory(
   const nextResponseTendency = handSource
     ? (eAxis.responseTendency ?? old.response_tendency)
     : null;
+  // 四维恒继承旧条（未显式提供时沿用旧值），weight 随之重算（旧 supersedeMemory 语义）。
+  const dims = dimensionsForInherit(input, old);
   await db
     .prepare(
       `INSERT INTO memories (
-        id, namespace, type, content, importance, confidence, status, pinned,
-        tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
+        id, namespace, type, content, importance, confidence, emotional, recurrence, unresolved, weight,
+        status, pinned, tags, source, source_message_ids, vector_id, created_at, updated_at, expires_at,
         fact_key, version_status, superseded_by, authored_by, response_tendency
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, null, ?, 'current', null, ?, ?)`
     )
     .bind(
       nextId,
       input.namespace,
       clampMemoryType(input.newType ?? old.type, "fact"),
       input.newContent,
-      input.importance ?? 0.6,
+      dims.importance,
       input.confidence ?? 0.8,
+      dims.emotional,
+      dims.recurrence,
+      dims.unresolved,
+      dims.weight,
       JSON.stringify(input.tags ?? []),
       effectiveSource,
       JSON.stringify(input.sourceMessageIds ?? []),
@@ -724,7 +761,9 @@ export async function restoreMemory(
   return true;
 }
 
-// hard delete: D1 (本体+侧车) + 向量都删。memory_delete 在 v2 开时用。
+// hard delete: D1 (本体+侧车) + 向量都删。当前无调用方（P5-A 起 memory_delete 走软删，
+// retention 硬删在 src/db/retention.ts hardDeleteMemoriesBatch）；保留作应急/参考工具。
+// P8 迁移核查若需要物理清行，可复用本函数的 tombstone 语义（向量删失败保 D1 行）。
 export async function deleteMemoryV2(
   env: Env,
   input: { namespace: string; id: string }
