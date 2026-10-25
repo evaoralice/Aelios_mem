@@ -1191,6 +1191,7 @@ function memoryAdmin() {
       { id: 'CHATBOX_API_KEY', label: '主钥匙' },
       { id: 'IM_API_KEY', label: '第二把' },
       { id: 'DEBUG_API_KEY', label: '维护' },
+      { id: 'MEMORY_MCP_API_KEY', label: 'MCP' },
       { id: 'GUIDE_DOG_API_KEY', label: '导盲犬' }
     ],
     gwAddress: '',

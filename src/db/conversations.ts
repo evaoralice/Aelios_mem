@@ -2,6 +2,13 @@ import type { Conversation } from "../types";
 import { newId } from "../utils/ids";
 import { nowIso } from "../utils/time";
 
+export class ConversationNamespaceMismatchError extends Error {
+  constructor() {
+    super("conversation_id belongs to another namespace");
+    this.name = "ConversationNamespaceMismatchError";
+  }
+}
+
 // ── Processing cursor (per-namespace memory extraction checkpoint) ──
 
 export interface ProcessingCursor {
@@ -48,7 +55,10 @@ export async function getOrCreateConversation(
     .bind(id)
     .first<Conversation>();
 
-  if (existing) return existing;
+  if (existing) {
+    if (existing.namespace !== input.namespace) throw new ConversationNamespaceMismatchError();
+    return existing;
+  }
 
   const now = nowIso();
   const conversation: Conversation = {

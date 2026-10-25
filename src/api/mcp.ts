@@ -1,6 +1,6 @@
 import { authenticate } from "../auth/apiKey";
 import { identityNamespace, loadConfig, type GatewayConfig } from "../gateway/config";
-import { getOrCreateConversation } from "../db/conversations";
+import { ConversationNamespaceMismatchError, getOrCreateConversation } from "../db/conversations";
 import { fetchMemoriesByIds, getMemoryById, listMemoriesPage, softDeleteMemory } from "../db/memories";
 import { saveIngestMessages } from "../db/messages";
 import {
@@ -129,8 +129,8 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
 // Reads that also write recall bookkeeping (counters / last-injected timestamps), never memory content.
 const BOOKKEEPING_READ = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 
-export function getTools(): Array<Record<string, unknown>> {
-  return [
+export function getTools(binding: McpNamespaceBinding = { namespace: null }): Array<Record<string, unknown>> {
+  const tools: Array<Record<string, unknown>> = [
     {
       name: "memory_search",
       description:
@@ -571,6 +571,15 @@ export function getTools(): Array<Record<string, unknown>> {
       }
     }
   ];
+  if (binding.namespace === null) return tools;
+  return tools.map((tool) => {
+    const inputSchema = tool.inputSchema as { properties?: Record<string, unknown> } | undefined;
+    const properties = inputSchema?.properties;
+    if (!inputSchema || !properties) return tool;
+    const nextProperties = { ...properties };
+    delete nextProperties.namespace;
+    return { ...tool, inputSchema: { ...inputSchema, properties: nextProperties } };
+  });
 }
 
 async function callTool(
@@ -641,7 +650,7 @@ async function callTool(
   if (params.name === "memory_list") {
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
     const limit = readPositiveInt(args.limit, 100, 1000);
-    const namespace = resolveNamespace(profile, args.namespace);
+    const namespace = binding.namespace ?? resolveNamespace(profile, args.namespace);
 
     // v2: 走 D1 (本体)，能列出 fact_key upsert 写入的记录。
     // v1: 走 Vectorize (向量是当时唯一存储)。
@@ -724,6 +733,7 @@ async function callTool(
 
     const memory = await getVectorMemory(env, id);
     if (!memory) return toolError("Memory not found");
+    if (binding.namespace !== null && memory.namespace !== binding.namespace) return toolError("Memory not found");
     return textToolResult({ data: memory });
   }
 
@@ -750,6 +760,10 @@ async function callTool(
       return textToolResult({ data: { id, deleted: true } });
     }
 
+    if (binding.namespace !== null) {
+      const existing = await getVectorMemory(env, id);
+      if (!existing || existing.namespace !== binding.namespace) return toolError("Memory not found");
+    }
     await deleteVectorMemory(env, id);
     return textToolResult({
       data: {
@@ -763,11 +777,17 @@ async function callTool(
     if (!hasScope(profile, "memory:write")) return toolError("Missing memory:write scope");
     const messages = readMessages(args.messages);
     if (messages.length === 0) return toolError("messages must contain at least one message");
-    const namespace = resolveNamespace(profile, args.namespace);
-    const conversation = await getOrCreateConversation(env.DB, {
-      namespace,
-      id: readString(args.conversation_id)
-    });
+    const namespace = binding.namespace ?? resolveNamespace(profile, args.namespace);
+    let conversation: Awaited<ReturnType<typeof getOrCreateConversation>>;
+    try {
+      conversation = await getOrCreateConversation(env.DB, {
+        namespace,
+        id: readString(args.conversation_id)
+      });
+    } catch (error) {
+      if (error instanceof ConversationNamespaceMismatchError) return toolError(error.message);
+      throw error;
+    }
     const source = readString(args.source) || "mcp";
     const ids = await saveIngestMessages(env.DB, {
       conversationId: conversation.id,
@@ -793,7 +813,7 @@ async function callTool(
   if (params.name === "memory_boot") {
     if (!hasScope(profile, "memory:read")) return toolError("Missing memory:read scope");
     if (!isV2Enabled(env)) return toolError("memory_boot requires MEMORY_LIFECYCLE_ENABLED=true");
-    const bootNamespace = resolveNamespace(profile, args.namespace);
+    const bootNamespace = binding.namespace ?? resolveNamespace(profile, args.namespace);
     const pkg = await buildBootPackage(env, {
       namespace: bootNamespace
     });
@@ -1068,7 +1088,7 @@ async function handleRpc(
   }
 
   if (request.method === "tools/list") {
-    return rpcResult(request.id, { tools: getTools() });
+    return rpcResult(request.id, { tools: getTools(binding) });
   }
 
   if (request.method === "resources/list") {
@@ -1108,7 +1128,7 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
       name: "companion-memory-mcp",
       transport: "streamable-http",
       endpoint: new URL(request.url).pathname,
-      tools: getTools().map((tool) => tool.name)
+      tools: getTools({ namespace: identitySlug }).map((tool) => tool.name)
     });
   }
 

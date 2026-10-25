@@ -217,3 +217,11 @@ test('P9 maintenance controls stay scoped to the selected namespace', async () =
   ]);
   assert.match(ADMIN_HTML, /P8 迁移后索引修复/);
 });
+
+test('gateway assistant editor exposes the identity-scoped MCP key', () => {
+  const { app } = panel();
+  assert.deepEqual(
+    Array.from(app.gwKeyOptions, (item: any) => item.id),
+    ['CHATBOX_API_KEY', 'IM_API_KEY', 'DEBUG_API_KEY', 'MEMORY_MCP_API_KEY', 'GUIDE_DOG_API_KEY']
+  );
+});

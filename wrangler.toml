@@ -78,7 +78,7 @@ ENABLE_DIARY_WRITER = "false"
 # 删掉这行不会清除远端旧值——上次推送的 "true" 会永久生效（服务全 503）。
 # 常驻此行、只改字面值：stage 1 冻结 = "true"，stage 2 解冻 = "false"（默认）。
 # 缺键或拼错会让 `npm run deploy` 在 setup 阶段直接失败（scripts/p8-deploy.mjs）。
-MAINTENANCE_MODE = "true"
+MAINTENANCE_MODE = "false"
 # GitHub daily archive pull（可选，默认禁用）。要用：去 Dashboard 手动加变量
 # GITHUB_DAILY_REPO（owner/repo）和 Secret GITHUB_DAILY_TOKEN（fine-grained PAT，
 # 只读目标仓库 Contents）；代码内默认路径 archive/daily，可用 GITHUB_DAILY_PATH 覆盖。

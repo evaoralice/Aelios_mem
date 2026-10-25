@@ -1,6 +1,6 @@
 import { authenticate } from "../auth/apiKey";
 import { requireScope } from "../auth/scopes";
-import { getOrCreateConversation } from "../db/conversations";
+import { ConversationNamespaceMismatchError, getOrCreateConversation } from "../db/conversations";
 import { createMemory, getMemoryById, listMemoriesPage, softDeleteMemory, updateMemory } from "../db/memories";
 import { listMessagesByNamespaceInRange, saveIngestMessages } from "../db/messages";
 import { runDailyMemoryDigest } from "../memory/dailyDigest";
@@ -369,10 +369,18 @@ async function handleIngestMemories(
   if (messages.length === 0) return openAiError("messages must contain at least one message", 400);
 
   const namespace = resolveNamespace(profile, body.namespace);
-  const conversation = await getOrCreateConversation(env.DB, {
-    namespace,
-    id: readString(body.conversation_id)
-  });
+  let conversation: Awaited<ReturnType<typeof getOrCreateConversation>>;
+  try {
+    conversation = await getOrCreateConversation(env.DB, {
+      namespace,
+      id: readString(body.conversation_id)
+    });
+  } catch (error) {
+    if (error instanceof ConversationNamespaceMismatchError) {
+      return openAiError(error.message, 409, "conversation_namespace_mismatch");
+    }
+    throw error;
+  }
   const source = readString(body.source) || profile.source;
   const ids = await saveIngestMessages(env.DB, {
     conversationId: conversation.id,
