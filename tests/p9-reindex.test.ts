@@ -118,7 +118,9 @@ function insertMessage(overrides: { id?: string; namespace?: string; role?: stri
   return row;
 }
 
-// 模拟"P8 前旧向量"：Vectorize namespace 与 metadata.namespace 都是旧值，正文/类型等与 D1 一致。
+// 模拟"漂移向量"：Vectorize namespace 与 metadata.namespace 都是旧值，正文/类型等与 D1 一致。
+// metadata 带 embedding_model marker 且与当前生效模型一致——隔离出 namespace 漂移这一条
+// stale 理由（marker 缺失/不同模型的情况由 embedding_model 专项用例覆盖）。
 function plantDriftedVector(memory: MemoryRecord, oldNamespace: string) {
   vectors.set(memory.vector_id as string, {
     id: memory.vector_id as string,
@@ -126,6 +128,7 @@ function plantDriftedVector(memory: MemoryRecord, oldNamespace: string) {
     namespace: oldNamespace,
     metadata: {
       namespace: oldNamespace, kind: "memory", ref_id: memory.id,
+      embedding_model: "workers-ai/@cf/baai/bge-m3",
       type: memory.type, content: memory.content, status: "active", tags: "[]"
     }
   });
@@ -177,25 +180,26 @@ test("namespace drift: dry run reports stale, repair rewrites vector under the n
 });
 
 test("content / type / tags / status drift keep being flagged stale", async () => {
+  // 四个 fixture 都带与当前生效模型一致的 embedding_model marker，隔离出各自的 stale 理由。
   const content = insertMemory({ content: "新内容" });
   vectors.set(content.vector_id as string, {
     id: content.vector_id as string, values: [0.1], namespace: "eva",
-    metadata: { namespace: "eva", ref_id: content.id, content: "旧内容", type: content.type, tags: "[]", status: "active" }
+    metadata: { namespace: "eva", ref_id: content.id, embedding_model: "workers-ai/@cf/baai/bge-m3", content: "旧内容", type: content.type, tags: "[]", status: "active" }
   });
   const type = insertMemory({ type: "fact" });
   vectors.set(type.vector_id as string, {
     id: type.vector_id as string, values: [0.1], namespace: "eva",
-    metadata: { namespace: "eva", ref_id: type.id, content: type.content, type: "note", tags: "[]", status: "active" }
+    metadata: { namespace: "eva", ref_id: type.id, embedding_model: "workers-ai/@cf/baai/bge-m3", content: type.content, type: "note", tags: "[]", status: "active" }
   });
   const tags = insertMemory({ tags: "[\"x\"]" });
   vectors.set(tags.vector_id as string, {
     id: tags.vector_id as string, values: [0.1], namespace: "eva",
-    metadata: { namespace: "eva", ref_id: tags.id, content: tags.content, type: tags.type, tags: "[\"y\"]", status: "active" }
+    metadata: { namespace: "eva", ref_id: tags.id, embedding_model: "workers-ai/@cf/baai/bge-m3", content: tags.content, type: tags.type, tags: "[\"y\"]", status: "active" }
   });
   const status = insertMemory();
   vectors.set(status.vector_id as string, {
     id: status.vector_id as string, values: [0.1], namespace: "eva",
-    metadata: { namespace: "eva", ref_id: status.id, content: status.content, type: status.type, tags: "[]", status: "archived" }
+    metadata: { namespace: "eva", ref_id: status.id, embedding_model: "workers-ai/@cf/baai/bge-m3", content: status.content, type: status.type, tags: "[]", status: "archived" }
   });
   const clean = insertMemory();
   await embedNormally(clean);
@@ -221,6 +225,46 @@ test("second repair run is idempotent with no further writes", async () => {
   assert.equal(embedCalls, afterFirst.embedCalls, "no redundant embedding on the second run");
   assert.equal(upsertCalls, afterFirst.upsertCalls, "no redundant vectorize writes on the second run");
   assert.ok(vectors.has(missing.vector_id as string));
+});
+
+test("embedding model change: old-model vectors go stale, repair converges with no repeated re-embedding", async () => {
+  // 换 embedding 模型后的真实形状：旧向量 metadata 的 embedding_model 停在旧模型名
+  // （模型变更前的向量根本没有 marker，同一条判staleness路径），其余 metadata 全一致。
+  const one = insertMemory({ content: "旧模型向量一", namespace: "eva" });
+  const two = insertMemory({ content: "旧模型向量二", namespace: "eva" });
+  for (const memory of [one, two]) {
+    vectors.set(memory.vector_id as string, {
+      id: memory.vector_id as string,
+      values: [0.1], namespace: "eva",
+      metadata: {
+        namespace: "eva", kind: "memory", ref_id: memory.id,
+        embedding_model: "workers-ai/@cf/google/embeddinggemma-300m",
+        type: memory.type, content: memory.content, status: "active", tags: "[]"
+      }
+    });
+  }
+
+  const dry = await post("/v1/p9-reindex", { namespace: "eva" });
+  assert.deepEqual(dry.data.counts, { ok: 0, missing: 0, stale: 2, no_vector_id: 0 });
+  assert.equal(dry.data.pending, 2);
+  assert.equal(dry.data.converged, false);
+
+  const repaired = await post("/v1/p9-reindex", { namespace: "eva", dry_run: false });
+  assert.equal(repaired.data.repair.repaired, 2);
+  assert.equal(repaired.data.converged, true);
+  for (const memory of [one, two]) {
+    assert.equal(
+      (vectors.get(memory.vector_id as string) as any).metadata.embedding_model,
+      "workers-ai/@cf/baai/bge-m3",
+      "repair rewrites the vector with the currently effective model in the marker"
+    );
+  }
+
+  embedCalls = 0;
+  const again = await post("/v1/p9-reindex", { namespace: "eva", dry_run: false });
+  assert.equal(again.data.converged, true);
+  assert.equal(again.data.repair.attempted, 0, "marker makes the next round converge naturally");
+  assert.equal(embedCalls, 0, "converged rounds never re-embed");
 });
 
 test("doctor never deletes anything unless cleanup is explicitly true", async () => {

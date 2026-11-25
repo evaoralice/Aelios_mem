@@ -120,12 +120,15 @@ export async function deleteLongtail(
 // longtail 向量同步 (dream 种向量用)
 // =====================================================================
 
+// metadata 带 embedding_model marker（与主记忆向量同一出处 effectiveEmbeddingModel）：
+// 查询侧只接受 marker 等于当前模型的向量，模型切换后旧向量自然失配、
+// 召回落回 LIKE 占位兜底（recall.ts），不做 backfill——重建留待后续需要时单独跑。
 export async function upsertLongtailEmbedding(
   env: Env,
   input: { id: string; namespace: string; content: string }
 ): Promise<void> {
   if (!env.VECTORIZE) return;
-  const { createEmbedding } = await import("../../memory/embedding");
+  const { createEmbedding, effectiveEmbeddingModel } = await import("../../memory/embedding");
   const vector = await createEmbedding(env, input.content);
   if (!vector) return;
   await env.VECTORIZE.upsert([
@@ -136,6 +139,7 @@ export async function upsertLongtailEmbedding(
       metadata: {
         namespace: input.namespace,
         kind: "longtail",
+        embedding_model: effectiveEmbeddingModel(env),
         ref_id: input.id,
         content: input.content
       }

@@ -1,6 +1,6 @@
 import { authenticate } from "../auth/apiKey";
 import { requireScope } from "../auth/scopes";
-import { createEmbedding } from "../memory/embedding";
+import { createEmbedding, effectiveEmbeddingModel } from "../memory/embedding";
 import {
   createVectorMemory,
   deleteVectorMemory,
@@ -84,10 +84,6 @@ function resolveStrictNamespace(
 
 function embeddingNorm(vector: number[]): number {
   return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
-}
-
-function readEmbeddingModel(env: Env): string {
-  return env.EMBEDDING_MODEL?.trim() || "workers-ai/@cf/baai/bge-m3";
 }
 
 function readEmbeddingProvider(model: string): string {
@@ -192,7 +188,7 @@ export async function handleVectorHealth(request: Request, env: Env): Promise<Re
   const phrase =
     url.searchParams.get("phrase")?.trim() ||
     `vector-health-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const model = readEmbeddingModel(env);
+  const model = effectiveEmbeddingModel(env);
   const result: Record<string, unknown> = {
     ok: false,
     namespace,
@@ -317,7 +313,7 @@ export async function handleVectorReindex(request: Request, env: Env): Promise<R
   const limit = readPositiveInt(body.limit, 50, 100);
   const cursor = readString(body.cursor);
   const dryRun = readBoolean(body.dry_run, true);
-  const model = readEmbeddingModel(env);
+  const model = effectiveEmbeddingModel(env);
 
   try {
     const page = await listVectorMemories(env, {

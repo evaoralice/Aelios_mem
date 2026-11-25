@@ -2,7 +2,7 @@ import type { Env, MemoryApiRecord, MemoryRecord } from "../types";
 import { newId } from "../utils/ids";
 import { clampScore, parseStringArray, readString } from "../utils/parse";
 import { nowIso } from "../utils/time";
-import { createEmbedding } from "./embedding";
+import { createEmbedding, effectiveEmbeddingModel } from "./embedding";
 import { computeWeight } from "../extensions/memoryWeight";
 import { memoryRankScore } from "../extensions/memoryRanking";
 import { deleteFtsRow, upsertMemoryFts } from "./fts";
@@ -71,10 +71,11 @@ function readBoolean(value: unknown): boolean {
   return value === true || value === "true" || value === 1;
 }
 
-function toMetadata(input: Required<VectorMemoryInput> & { id: string; vectorId: string; createdAt: string; updatedAt: string; status?: string }): Record<string, VectorizeVectorMetadata> {
+function toMetadata(input: Required<VectorMemoryInput> & { id: string; vectorId: string; createdAt: string; updatedAt: string; status?: string }, embeddingModel: string): Record<string, VectorizeVectorMetadata> {
   return {
     kind: "memory",
     namespace: input.namespace,
+    embedding_model: embeddingModel,
     ref_id: input.id,
     type: input.type,
     content: input.content,
@@ -414,7 +415,7 @@ export async function createVectorMemory(env: Env, input: VectorMemoryInput): Pr
         id: vectorId,
         namespace: normalized.namespace,
         values: vector,
-        metadata: toMetadata(normalized)
+        metadata: toMetadata(normalized, effectiveEmbeddingModel(env))
       }
     ]);
   } catch (error) {
@@ -509,14 +510,20 @@ export async function updateVectorMemory(
 
   // Metadata-only patches: skip re-embedding; reuse existing Vectorize values.
   // Vectorize upsert requires values, so fetch via getByIds; fall back to re-embed if missing.
+  // 复用还要求旧向量 metadata 的 embedding_model 与当前生效模型一致：旧向量没写 marker
+  // 或模型已换（embedding 模型变更后旧向量全量缺 marker）时，values 与新模型语义不可比，
+  // 正文没变也必须重新 embedding，否则旧向量会被误标成新模型。
   const contentUnchanged =
     patch.content === undefined || patch.content.trim() === existing.content;
+  const embeddingModel = effectiveEmbeddingModel(env);
   let vector: number[] | null = null;
   if (contentUnchanged) {
     try {
       const existingVectors = await requireVectorize(env).getByIds([vectorId]);
-      const values = existingVectors[0]?.values;
-      if (values && values.length > 0) {
+      const existingVector = existingVectors[0];
+      const values = existingVector?.values;
+      const existingModel = (existingVector?.metadata as Record<string, unknown> | undefined)?.embedding_model;
+      if (values && values.length > 0 && existingModel === embeddingModel) {
         vector = Array.from(values);
       }
     } catch (error) {
@@ -585,7 +592,7 @@ export async function updateVectorMemory(
         id: vectorId,
         namespace: next.namespace,
         values: vector,
-        metadata: toMetadata(next)
+        metadata: toMetadata(next, embeddingModel)
       }
     ]);
   } catch (error) {

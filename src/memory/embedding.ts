@@ -3,6 +3,14 @@ import { callOpenAICompatEmbeddings } from "../proxy/openaiAdapter";
 
 const DEFAULT_EMBEDDING_MODEL = "workers-ai/@cf/baai/bge-m3";
 
+// 当前实际生效的 embedding 模型名（env 覆盖，缺省/空白回落 DEFAULT）。
+// 唯一默认值出处：metadata marker 写入（upsertMemoryEmbedding / toMetadata）、
+// P9 审计比对（vectorBackfill.staleReason）、updateVectorMemory 复用判定与
+// debug 端点的 config 上报都从这里取值，不得各自维护兜底，否则 marker 会各自漂移。
+export function effectiveEmbeddingModel(env: Env): string {
+  return env.EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
+}
+
 function workersAiModelName(model: string): string | null {
   const normalized = model.trim();
   if (normalized.startsWith("workers-ai/")) return normalized.slice("workers-ai/".length);
@@ -47,14 +55,29 @@ function readEmbedding(result: unknown): number[] | null {
   return null;
 }
 
+// Workers AI embedding 请求体按模型族分发：embeddinggemma-2 的输入契约是 `input`
+// （官方 schema required:["input"]，发旧字段 `text` 会被 schema 校验直接拒绝——
+// createEmbedding 吞错返回 null，写入/召回/P9 repair 全部失败）；旧 embedding 系
+// （bge-m3 / embeddinggemma-300m）仍是 `text`。新模型族接入时必须同步：
+// ①核对模型页 schema-input.json；②改这里；③加 payload 断言测试
+// （tests/embedding-model-marker.test.ts）——AI double 按旧形状取字段测不出此断裂。
+function workersAiEmbeddingPayload(model: string, text: string): Record<string, unknown> {
+  return /embeddinggemma-2/.test(model) ? { input: [text] } : { text: [text] };
+}
+
 export async function createEmbedding(env: Env, text: string): Promise<number[] | null> {
-  const model = env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  const model = effectiveEmbeddingModel(env);
   const workersAiModel = workersAiModelName(model);
   if (workersAiModel) {
     if (!env.AI) return null;
     try {
       // workersAiModel is parsed at runtime from EMBEDDING_MODEL; keyof AiModels is the narrowest safe cast.
-      const result = await env.AI.run(workersAiModel as keyof AiModels, { text: [text] });
+      // embeddinggemma-2 未进已安装 workers-types（仅 300m 收录），payload 形状由运行时
+      // 模型族决定（workersAiEmbeddingPayload），这里同样收窄 cast 而不是拓宽类型。
+      const result = await env.AI.run(
+        workersAiModel as keyof AiModels,
+        workersAiEmbeddingPayload(workersAiModel, text) as AiTextEmbeddingsInput
+      );
       return readEmbedding(result);
     } catch (error) {
       console.error("memory embedding failed", error);
@@ -104,6 +127,7 @@ export async function upsertMemoryEmbedding(env: Env, memory: MemoryRecord): Pro
       metadata: {
         namespace: memory.namespace,
         kind: "memory",
+        embedding_model: effectiveEmbeddingModel(env),
         ref_id: memory.id,
         type: memory.type,
         content: memory.content,

@@ -10,7 +10,7 @@
 // 聚合取最大值，等价于 T-Mem 的 nanmax(cos_c, cos_b, cos_j)：三个角度里只要有一个
 // 对上就算命中，不因为另外两个不像而被平均掉。
 
-import { createEmbedding } from "../embedding";
+import { createEmbedding, effectiveEmbeddingModel } from "../embedding";
 import type { Env } from "../../types";
 
 export const TRIGGER_NS_PREFIX = "trg:";
@@ -50,6 +50,7 @@ export async function upsertTriggerVectors(
   ];
 
   const vectors: VectorizeVector[] = [];
+  const model = effectiveEmbeddingModel(env);
   for (const [view, text] of views) {
     if (!text.trim()) continue;
     const values = await createEmbedding(env, text);
@@ -61,6 +62,7 @@ export async function upsertTriggerVectors(
       metadata: {
         namespace: ns,
         kind: "trigger",
+        embedding_model: model,
         view,
         trigger_key: input.vectorId,
         memory_ns: input.namespace,
@@ -95,12 +97,17 @@ export interface TriggerMatch {
 // 查触发器索引，按 trigger_key 取三视图最大分。
 // 只查带 namespace 的那一路——触发器没有迁移期遗留向量，不需要 legacy 兜底，
 // 也不该给它开那条不带 filter 的口子。
+// 模型一致性（2026-11-25）：filter 与 metadata 双保险都要求 embedding_model 等于
+// 当前生效模型——旧模型向量（marker 缺失或不同）与新模型语义不可比，混入会污染
+// 触发器候选池；旧向量被过滤后触发器通道自然静默（不做 backfill，重建留待
+// 后续需要时单独跑）。
 export async function queryTriggerVectors(
   env: Env,
   input: { namespace: string; queryVector: number[]; topK: number }
 ): Promise<TriggerMatch[]> {
   if (!env.VECTORIZE) return [];
   const ns = triggerNamespace(input.namespace);
+  const currentModel = effectiveEmbeddingModel(env);
   // 三视图意味着同一条触发器最多占 3 个返回位，所以按 3 倍取回再聚合，
   // 否则 topK 会被同一条触发器的三个视图吃满。
   const topK = Math.min(Math.max(Math.floor(input.topK), 1) * 3, 100);
@@ -108,7 +115,7 @@ export async function queryTriggerVectors(
     topK,
     namespace: ns,
     returnMetadata: "all",
-    filter: { namespace: ns, kind: "trigger" }
+    filter: { namespace: ns, kind: "trigger", embedding_model: currentModel }
   });
 
   const best = new Map<string, TriggerMatch>();
@@ -118,6 +125,8 @@ export async function queryTriggerVectors(
     if (md.kind !== "trigger") continue;
     if (typeof md.namespace !== "string" || md.namespace !== ns) continue;
     if (typeof md.memory_ns !== "string" || md.memory_ns !== input.namespace) continue;
+    // 双保险同上：marker 缺失（旧向量）或模型不同的一律丢弃，不进候选池。
+    if (md.embedding_model !== currentModel) continue;
     const key = typeof md.trigger_key === "string" ? md.trigger_key : "";
     const memoryId = typeof md.ref_id === "string" ? md.ref_id : "";
     if (!key || !memoryId) continue;

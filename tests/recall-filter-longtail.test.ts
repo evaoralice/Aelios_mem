@@ -135,3 +135,76 @@ test("reranker 正常选中：召回结果不变，longtail 不参与", async ()
   assert.equal(body.data[0].score, 0.95);
   assert.ok(!body.data.some((h: any) => h.source_layer === "longtail"));
 });
+
+// --- longtail 向量的 embedding_model marker（模型切换，2026-11-25）---
+// 旧模型 longtail 向量被查询侧过滤 → 向量命中为空 → 落回 LIKE 占位兜底；
+// 新写入的向量（带当前模型 marker）走向量命中。本文件 env 未配 EMBEDDING_MODEL，
+// 当前生效模型即缺省 bge-m3。query double 有意忽略 embedding_model 过滤键，
+// 逼出 recallLongtailByVector 的 metadata 双保险。
+
+const ltVectors = new Map<string, { id: string; values: number[]; metadata: Record<string, unknown> }>();
+
+function attachLongtailVectorDouble() {
+  env.VECTORIZE = {
+    async getByIds() { return []; },
+    async upsert() { return { mutationId: "m" }; },
+    async query(_vector: number[], options: any) {
+      if (!options?.filter) return { matches: [] };
+      const matches = [...ltVectors.values()]
+        .filter((v) => v.metadata.namespace === options.namespace)
+        .filter((v) => Object.entries(options.filter as Record<string, unknown>)
+          .every(([k, val]) => k === "embedding_model" || v.metadata[k] === val))
+        .map((v) => ({ id: v.id, score: 0.9, metadata: v.metadata }));
+      return { matches };
+    }
+  };
+}
+
+function plantLongtailVector(marker: string | null) {
+  ltVectors.clear();
+  const metadata: Record<string, unknown> = {
+    namespace: "sol", kind: "longtail", ref_id: "lt_1", content: "芝麻开门备用入口"
+  };
+  if (marker) metadata.embedding_model = marker;
+  ltVectors.set("lt_lt_1", { id: "lt_lt_1", values: [0.1], metadata });
+}
+
+test("旧模型 longtail 向量被 marker 过滤，召回落回 LIKE 占位兜底", async () => {
+  seedLongtail("芝麻开门备用入口");
+  plantLongtailVector("workers-ai/@cf/google/embeddinggemma-300m");
+  attachLongtailVectorDouble();
+  rerankerBehavior = "throw";
+
+  const body = await recall("芝麻开门备用入口");
+
+  assert.equal(body.data.length, 1);
+  assert.equal(body.data[0].source_layer, "longtail");
+  // LIKE 占位分支的固定得分 0.1；若 marker 过滤失效，旧向量会以 0.9 的 double 分浮出。
+  assert.equal(body.data[0].score, 0.1);
+  assert.equal(body.data[0].content, "芝麻开门备用入口");
+});
+
+test("缺 marker 的 longtail 向量同样被过滤，不留任何跨模型命中", async () => {
+  seedLongtail("芝麻开门备用入口");
+  plantLongtailVector(null);
+  attachLongtailVectorDouble();
+  rerankerBehavior = "throw";
+
+  const body = await recall("芝麻开门备用入口");
+
+  assert.equal(body.data[0].source_layer, "longtail");
+  assert.equal(body.data[0].score, 0.1, "marker 缺失（标记机制前的旧向量）也走 LIKE 兜底");
+});
+
+test("当前模型 marker 的 longtail 向量正常走向量命中", async () => {
+  seedLongtail("芝麻开门备用入口");
+  plantLongtailVector("workers-ai/@cf/baai/bge-m3");
+  attachLongtailVectorDouble();
+  rerankerBehavior = "throw";
+
+  const body = await recall("芝麻开门备用入口");
+
+  assert.equal(body.data[0].source_layer, "longtail");
+  assert.equal(body.data[0].score, 0.9, "向量分支命中（double 分），不是 LIKE 的 0.1");
+  assert.equal(body.data[0].content, "芝麻开门备用入口");
+});

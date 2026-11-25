@@ -194,6 +194,7 @@ test("metadata written by older paths is not flagged stale for formatting differ
     id: `mem_${memory.id}`, values: [0.1],
     metadata: {
       namespace: "default", status: "active",
+      embedding_model: "workers-ai/@cf/baai/bge-m3",
       ref_id: memory.id, content: memory.content, type: memory.type, tags: "[\"a\",\"b\"]"
     }
   });
@@ -201,4 +202,53 @@ test("metadata written by older paths is not flagged stale for formatting differ
   const report = await runVectorBackfill(env, { namespace: "default" });
 
   assert.deepEqual(report.counts, { ok: 1, missing: 0, stale: 0, no_vector_id: 0 });
+});
+
+test("old vectors without an embedding_model marker are stale with reason embedding_model", async () => {
+  const memory = insertMemory({ content: "模型变更前的旧向量" });
+  await embedNormally(memory);
+  delete (vectors.get(`mem_${memory.id}`) as { metadata: Record<string, unknown> }).metadata.embedding_model;
+
+  const dry = await runVectorBackfill(env, { namespace: "default" });
+  assert.deepEqual(dry.counts, { ok: 0, missing: 0, stale: 1, no_vector_id: 0 });
+  assert.equal(dry.samples.stale[0].reason, "embedding_model");
+});
+
+test("vectors whose embedding_model marker names another model are stale", async () => {
+  const memory = insertMemory({ content: "旧模型的向量" });
+  await embedNormally(memory);
+  (vectors.get(`mem_${memory.id}`) as { metadata: Record<string, unknown> }).metadata.embedding_model =
+    "workers-ai/@cf/google/embeddinggemma-300m";
+
+  const dry = await runVectorBackfill(env, { namespace: "default" });
+  assert.deepEqual(dry.counts, { ok: 0, missing: 0, stale: 1, no_vector_id: 0 });
+  assert.equal(dry.samples.stale[0].reason, "embedding_model");
+});
+
+test("a matching embedding_model marker with consistent metadata counts as ok", async () => {
+  const memory = insertMemory();
+  await embedNormally(memory);
+
+  const report = await runVectorBackfill(env, { namespace: "default" });
+  assert.deepEqual(report.counts, { ok: 1, missing: 0, stale: 0, no_vector_id: 0 });
+});
+
+test("repair writes the current model marker and the next round converges without re-embedding", async () => {
+  const memory = insertMemory({ content: "等修复的旧向量" });
+  await embedNormally(memory);
+  delete (vectors.get(`mem_${memory.id}`) as { metadata: Record<string, unknown> }).metadata.embedding_model;
+
+  const fixed = await runVectorBackfill(env, { namespace: "default", dryRun: false });
+  assert.equal(fixed.repair?.repaired, 1);
+  assert.equal(
+    (vectors.get(`mem_${memory.id}`) as { metadata: Record<string, unknown> }).metadata.embedding_model,
+    "workers-ai/@cf/baai/bge-m3",
+    "repair writes the currently effective model into the marker"
+  );
+
+  embedCalls = 0;
+  const again = await runVectorBackfill(env, { namespace: "default", dryRun: false });
+  assert.deepEqual(again.counts, { ok: 1, missing: 0, stale: 0, no_vector_id: 0 });
+  assert.equal(again.repair?.attempted, 0);
+  assert.equal(embedCalls, 0, "a converged round re-embeds nothing");
 });

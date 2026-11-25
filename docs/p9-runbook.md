@@ -65,6 +65,23 @@ curl -sS -X POST https://<host>/v1/p9-reindex \
   可能出现，属于**敏感运维输出：不可外发、不可提交**。
 - `stale` 含 namespace 漂移：P8 把 D1 namespace 从旧 role_scope 改写为新值后，
   停在旧值的向量对 namespaced query 永远召回隐身，repair 会按 D1 当前 namespace 重写。
+- `stale` 含 embedding 模型变更（2026-11-25）：向量 metadata 的 `embedding_model`
+  marker 缺失（标记机制上线前的旧向量）或与当前生效 `EMBEDDING_MODEL` 不一致 →
+  reason=`embedding_model`；repair 从 D1 正文按新模型重 embed 并写入当前模型
+  marker。**切换 embedding 模型后，首轮扫描会把该 namespace 全部旧向量判 stale，
+  逐批 repair 后自然收敛**（marker 落成当前模型，后续轮次不再重复重算）——不存在
+  也不需要 force 参数；FTS 与 embedding 模型无关，模型切换不涉及 FTS 重建。
+  注意：embeddinggemma-2 起 Workers AI 的请求体契约是 `input`（旧 bge/300m 是
+  `text`），`createEmbedding` 已按模型族分发；**再接新模型族必须先核对模型页的
+  schema-input.json 并加 payload 断言测试**，否则 embedding 调用会被 schema 校验
+  拒绝、P9 repair 无法收敛。
+- **P9 范围外的同索引向量（2026-11-25 用户裁定）**：trigger（`trg:` 前缀）与
+  longtail 向量不在 P9 扫描范围（P9 只扫 memories 表），但写入已带
+  `embedding_model` marker、查询侧只接受 marker 等于当前模型的向量——模型切换后
+  旧 trigger 向量自然失配（触发器通道静默），旧 longtail 向量失配后召回落回
+  既有 LIKE 占位兜底。**暂不做这两类的 backfill**；后续需要重建时另立工作包
+  （trigger 走 `upsertTriggerVectors`、longtail 走 `upsertLongtailEmbedding`，
+  都可从 D1 正文重 embed）。`TRIGGER_BUILD`/`TRIGGER_RECALL` 默认 off 不变。
 
 ## 2. 向量：同 namespace 显式修复，重复运行直到收敛
 

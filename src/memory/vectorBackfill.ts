@@ -12,11 +12,14 @@
 //   3. 分类：
 //        ok       —— 向量在，metadata 跟 D1 对得上。
 //        missing  —— 向量不在。
-//        stale    —— 向量在，但 namespace / content / type / tags / status 跟 D1 不一致
+//        stale    —— 向量在，但 namespace / content / type / tags / status 跟 D1 不一致，
+//                    或 metadata 的 embedding_model 缺失/与当前生效模型不同
 //                    (更新时 embedding 失败留下的旧向量，召回会拿到旧内容；
 //                     P8 迁移把 D1 namespace 从旧 role_scope 改写成新值后，
 //                     旧向量的 metadata.namespace 还停在迁移前——按 namespaced query
-//                     永远召不到，必须跟其它 stale 一样重写)。
+//                     永远召不到，必须跟其它 stale 一样重写；
+//                     embedding 模型变更后，没写 marker 的旧向量与新模型语义不可比，
+//                     同样判 stale 重 embed)。
 //        no_vector_id —— D1 行没有 vector_id，只报告不修 (修要写 D1，这里不碰本体)。
 //   4. dry_run=false 时对 missing + stale 调 upsertMemoryEmbedding，跟正常写入路径同一个函数，
 //      向量 id 和 metadata 形状不会漂移。每次最多修 limit 条，剩下的在 remaining 里报出来。
@@ -31,7 +34,7 @@
 // Vectorize 写入是异步生效的，刚补完立刻再查可能还显示 missing，重复 upsert 是幂等的，无害。
 
 import type { Env, MemoryRecord } from "../types";
-import { upsertMemoryEmbedding } from "./embedding";
+import { effectiveEmbeddingModel, upsertMemoryEmbedding } from "./embedding";
 
 // Vectorize getByIds platform hard cap (code 40007) — do not raise.
 const GETBYIDS_BATCH = 20;
@@ -124,7 +127,11 @@ function normalizeTags(raw: string | null): string {
   }
 }
 
-function staleReason(memory: MemoryRecord, metadata: Record<string, unknown>): string | null {
+// embedding_model 是模型一致性的核心字段：marker 缺失（模型变更前的旧向量）或与当前
+// 生效模型不同，values 就与新模型语义不可比——即使其余 metadata 全对也必须重 embed。
+// 模型一致才继续比对参与 embedding 文本/召回过滤/归属的字段。
+function staleReason(memory: MemoryRecord, metadata: Record<string, unknown>, currentModel: string): string | null {
+  if (readMetaString(metadata, "embedding_model") !== currentModel) return "embedding_model";
   if (readMetaString(metadata, "namespace") !== memory.namespace) return "namespace";
   if (readMetaString(metadata, "content") !== memory.content) return "content";
   if (readMetaString(metadata, "type") !== memory.type) return "type";
@@ -206,6 +213,7 @@ export async function runVectorBackfill(env: Env, input: VectorBackfillInput): P
 
   const missing: MemoryRecord[] = [];
   const stale: MemoryRecord[] = [];
+  const currentModel = effectiveEmbeddingModel(env);
   for (let i = 0; i < withVectorId.length; i += GETBYIDS_BATCH) {
     const batch = withVectorId.slice(i, i + GETBYIDS_BATCH);
     let found: Map<string, Record<string, unknown>>;
@@ -225,7 +233,7 @@ export async function runVectorBackfill(env: Env, input: VectorBackfillInput): P
         missing.push(memory);
         continue;
       }
-      const reason = staleReason(memory, metadata);
+      const reason = staleReason(memory, metadata, currentModel);
       if (reason) {
         record("stale", memory, reason);
         stale.push(memory);

@@ -26,7 +26,7 @@ import { getIsoWeekLabelForDateLabel } from "../weeklyRollup";
 import { searchMemoriesWithProvenance } from "../search";
 import type { MemoryApiRecordWithProvenance } from "../search";
 import { filterAndCompressMemoriesWithMeta } from "../filter";
-import { createEmbedding } from "../embedding";
+import { createEmbedding, effectiveEmbeddingModel } from "../embedding";
 import { shapeRecallQuery } from "../queryShape";
 import { expandRecallByRelations, isRelationExpansionEnabled } from "../relations";
 import { fetchTriggeredRecords, isTriggerRecallEnabled, recallByTriggers } from "../triggers";
@@ -716,6 +716,9 @@ async function recallLongtailFallback(env: Env, input: RecallInput): Promise<Rec
 
 // 向量兜底: longtail 在 dream 第 4 步种向量后, 按 kind:"longtail" 召回。
 // 向量库没数据 (第 2/3 步) 或 embedding 不可用时返回空, 触发 LIKE 占位分支。
+// 模型一致性 (2026-11-25): filter 与 metadata 双保险都要求 embedding_model 等于
+// 当前生效模型——模型切换后旧 longtail 向量 (marker 缺失或不同) 自然失配,
+// 向量命中为空即落回下面的 LIKE 占位; 不做 backfill, 重建留待后续需要时单独跑。
 async function recallLongtailByVector(
   env: Env,
   input: RecallInput
@@ -723,18 +726,19 @@ async function recallLongtailByVector(
   if (!env.VECTORIZE || !input.query.trim()) return [];
   const vector = await createEmbedding(env, input.query);
   if (!vector) return [];
+  const currentModel = effectiveEmbeddingModel(env);
   try {
     const result = await env.VECTORIZE.query(vector, {
       topK: 5,
       namespace: input.namespace,
       returnMetadata: true,
-      filter: { namespace: input.namespace, kind: "longtail" } as VectorizeVectorMetadataFilter
+      filter: { namespace: input.namespace, kind: "longtail", embedding_model: currentModel } as VectorizeVectorMetadataFilter
     } as unknown as Parameters<typeof env.VECTORIZE.query>[1]);
-    const matches = (result?.matches ?? []) as Array<{
+    const matches = ((result?.matches ?? []) as Array<{
       id: string;
       score: number;
       metadata?: Record<string, unknown>;
-    }>;
+    }>).filter((match) => match.metadata?.embedding_model === currentModel);
     const candidateIds = matches.flatMap((match) => candidateLongtailIds(match));
     const rows = await fetchLongtailByIds(env.DB, { namespace: input.namespace, ids: candidateIds });
     const rowById = new Map(rows.map((row) => [row.id, row]));
